@@ -27,14 +27,15 @@ impl CopyOptions {
             excludes: Vec::new(),
         };
 
+        let mut positional = Vec::new();
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
-                "--verbose" | "-v" => opts.verbose = true,
-                "--preserve-hfs-data" => opts.preserve_hfs_data = true,
-                "--ignore-missing-inputs" => opts.ignore_missing_inputs = true,
-                "--resolve-src-symlinks" => opts.resolve_src_symlinks = true,
-                "--strip-debug-symbols" => opts.strip_debug_symbols = true,
+                "--verbose" | "-v" | "-V" => opts.verbose = true,
+                "--preserve-hfs-data" | "-preserve-hfs-data" => opts.preserve_hfs_data = true,
+                "--ignore-missing-inputs" | "-ignore-missing-inputs" => opts.ignore_missing_inputs = true,
+                "--resolve-src-symlinks" | "-resolve-src-symlinks" => opts.resolve_src_symlinks = true,
+                "--strip-debug-symbols" | "-strip-debug-symbols" => opts.strip_debug_symbols = true,
                 "--output" | "-o" => {
                     i += 1;
                     if i >= args.len() {
@@ -42,24 +43,38 @@ impl CopyOptions {
                     }
                     opts.output = Some(args[i].clone());
                 }
-                "--exclude" => {
+                "--exclude" | "-exclude" => {
                     i += 1;
                     if i >= args.len() {
                         return Err("missing value for --exclude".into());
                     }
                     opts.excludes.push(args[i].clone());
                 }
-                "--bitcode-strip" | "--strip-tool" | "--bitcode-strip-tool" => {
+                "--strip-tool" | "-strip-tool" => {
+                    i += 1; // skip value
+                }
+                "--bitcode-strip-tool" | "-bitcode-strip-tool" => {
+                    i += 1; // skip value
+                }
+                "--bitcode-strip" | "-bitcode-strip" => {
                     i += 1; // skip value
                 }
                 _ => {
                     if args[i].starts_with('-') {
                         return Err(format!("unknown option: {}", args[i]));
                     }
-                    opts.inputs.push(args[i].clone());
+                    positional.push(args[i].clone());
                 }
             }
             i += 1;
+        }
+
+        // If no explicit --output was given, use the last positional arg as output
+        if opts.output.is_none() && positional.len() >= 2 {
+            opts.output = Some(positional.pop().unwrap());
+            opts.inputs = positional;
+        } else {
+            opts.inputs = positional;
         }
 
         Ok(opts)
@@ -171,7 +186,26 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     for input in &opts.inputs {
-        let src = Path::new(input);
+        let src_original = Path::new(input);
+
+        // Resolve symlinks if requested
+        let src_buf;
+        let src = if opts.resolve_src_symlinks {
+            match fs::canonicalize(src_original) {
+                Ok(resolved) => {
+                    src_buf = resolved;
+                    src_buf.as_path()
+                }
+                Err(_) => {
+                    // If canonicalize fails (e.g., path doesn't exist), use original
+                    src_buf = src_original.to_path_buf();
+                    src_buf.as_path()
+                }
+            }
+        } else {
+            src_buf = src_original.to_path_buf();
+            src_buf.as_path()
+        };
 
         if !src.is_dir() && !src.exists() {
             if opts.ignore_missing_inputs {
