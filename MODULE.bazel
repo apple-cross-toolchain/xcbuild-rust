@@ -2,9 +2,6 @@ module(name = "xcbuild-rust", version = "0.2.0")
 
 bazel_dep(name = "rules_rust", version = "0.69.0")
 bazel_dep(name = "tar.bzl", version = "0.9.0")
-bazel_dep(name = "llvm", version = "0.6.0")
-
-register_toolchains("@llvm//toolchain:all")
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 

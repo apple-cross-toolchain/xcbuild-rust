@@ -10,7 +10,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - run: bazel build //:xcbuild --platforms=@llvm//platforms:linux_x86_64
+      - run: bazel build //:xcbuild
       - uses: softprops/action-gh-release@v2
         with:
           files: bazel-bin/xcbuild.tar.xz
