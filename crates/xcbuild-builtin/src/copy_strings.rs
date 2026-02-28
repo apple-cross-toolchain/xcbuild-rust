@@ -21,9 +21,18 @@ impl CopyStringsOptions {
         };
 
         let mut i = 0;
+        let mut separator = false;
         while i < args.len() {
+            if separator {
+                opts.inputs.push(args[i].clone());
+                i += 1;
+                continue;
+            }
             match args[i].as_str() {
-                "--output-dir" => {
+                "--" => {
+                    separator = true;
+                }
+                "--output-dir" | "--outdir" => {
                     i += 1;
                     if i >= args.len() {
                         return Err("missing value for --output-dir".into());
@@ -31,14 +40,14 @@ impl CopyStringsOptions {
                     opts.output_dir = Some(args[i].clone());
                 }
                 "--validate" => opts.validate = true,
-                "--input-encoding" => {
+                "--input-encoding" | "--inputencoding" => {
                     i += 1;
                     if i >= args.len() {
                         return Err("missing value for --input-encoding".into());
                     }
                     opts.input_encoding = Some(args[i].clone());
                 }
-                "--output-encoding" => {
+                "--output-encoding" | "--outputencoding" => {
                     i += 1;
                     if i >= args.len() {
                         return Err("missing value for --output-encoding".into());
@@ -99,19 +108,33 @@ pub fn run(args: &[String]) -> i32 {
             }
         };
 
-        // For strings files, parse as plist and re-serialize as binary plist
+        // For strings files, parse as plist and re-serialize
         // (the standard behavior for Xcode's builtin-copyStrings)
         let output_data = match xcbuild_plist::deserialize(&data) {
             Ok((value, _format)) => {
                 if opts.validate {
-                    // Validate: must be a dictionary
-                    if !matches!(value, plist::Value::Dictionary(_)) {
+                    if let plist::Value::Dictionary(ref d) = value {
+                        for (key, val) in d.iter() {
+                            if !matches!(val, plist::Value::String(_) | plist::Value::Dictionary(_)) {
+                                eprintln!("error: {input_path}: invalid value for key '{key}'");
+                                return 1;
+                            }
+                        }
+                    } else {
                         eprintln!("error: {input_path}: not a valid strings dictionary");
                         return 1;
                     }
                 }
-                // Output as binary plist (standard for .strings in built products)
-                match xcbuild_plist::serialize(&value, xcbuild_plist::PlistFormat::Binary) {
+                let out_format = match opts.output_encoding.as_deref() {
+                    Some("binary") => xcbuild_plist::PlistFormat::Binary,
+                    Some("utf-8") | Some("utf-16") | Some("utf-32") => xcbuild_plist::PlistFormat::Xml,
+                    None => xcbuild_plist::PlistFormat::Binary,
+                    Some(enc) => {
+                        eprintln!("error: unknown output encoding '{enc}'");
+                        return 1;
+                    }
+                };
+                match xcbuild_plist::serialize(&value, out_format) {
                     Ok(d) => d,
                     Err(e) => {
                         eprintln!("error: {input_path}: {e}");
@@ -119,9 +142,9 @@ pub fn run(args: &[String]) -> i32 {
                     }
                 }
             }
-            Err(_) => {
-                // If it doesn't parse as plist, just copy as-is
-                data
+            Err(e) => {
+                eprintln!("error: {input_path}: failed to parse: {e}");
+                return 1;
             }
         };
 
