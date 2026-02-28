@@ -5,22 +5,40 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+            artifact: xcbuild-linux-x86_64.tar.xz
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            artifact: xcbuild-linux-aarch64.tar.xz
+          - os: macos-13
+            arch: x86_64
+            artifact: xcbuild-macos-x86_64.tar.xz
+          - os: macos-14
+            arch: aarch64
+            artifact: xcbuild-macos-aarch64.tar.xz
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - run: bazel build //:xcbuild
-      - id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: cp bazel-bin/xcbuild.tar.xz ${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ github.ref }}
-          release_name: ${{ github.ref }}
-      - uses: actions/upload-release-asset@v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: bazel-bin/xcbuild.tar.xz
-          asset_name: xcbuild.tar.xz
-          asset_content_type: application/x-xz
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: xcbuild-*.tar.xz
