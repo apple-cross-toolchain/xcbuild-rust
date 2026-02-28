@@ -4,37 +4,13 @@ on:
       - '*'
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - platform: "@llvm//platforms:linux_x86_64"
-            artifact: xcbuild-linux-x86_64.tar.xz
-          - platform: "@llvm//platforms:linux_aarch64"
-            artifact: xcbuild-linux-aarch64.tar.xz
-          - platform: "@llvm//platforms:macos_x86_64"
-            artifact: xcbuild-macos-x86_64.tar.xz
-          - platform: "@llvm//platforms:macos_aarch64"
-            artifact: xcbuild-macos-aarch64.tar.xz
-    steps:
-      - uses: actions/checkout@v4
-      - run: bazel build //:xcbuild --platforms=${{ matrix.platform }}
-      - run: cp bazel-bin/xcbuild.tar.xz ${{ matrix.artifact }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
-
   release:
-    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
+      - uses: actions/checkout@v4
+      - run: bazel build //:xcbuild --platforms=@llvm//platforms:linux_x86_64
       - uses: softprops/action-gh-release@v2
         with:
-          files: xcbuild-*.tar.xz
+          files: bazel-bin/xcbuild.tar.xz
