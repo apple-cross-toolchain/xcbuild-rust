@@ -5,25 +5,21 @@ on:
 
 jobs:
   build:
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            arch: x86_64
+          - platform: "@llvm//platforms:linux_x86_64"
             artifact: xcbuild-linux-x86_64.tar.xz
-          - os: ubuntu-24.04-arm
-            arch: aarch64
+          - platform: "@llvm//platforms:linux_aarch64"
             artifact: xcbuild-linux-aarch64.tar.xz
-          - os: macos-26
-            arch: x86_64
+          - platform: "@llvm//platforms:macos_x86_64"
             artifact: xcbuild-macos-x86_64.tar.xz
-          - os: macos-26-arm
-            arch: aarch64
+          - platform: "@llvm//platforms:macos_aarch64"
             artifact: xcbuild-macos-aarch64.tar.xz
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: bazel build //:xcbuild
+      - run: bazel build //:xcbuild --platforms=${{ matrix.platform }}
       - run: cp bazel-bin/xcbuild.tar.xz ${{ matrix.artifact }}
       - uses: actions/upload-artifact@v4
         with:
