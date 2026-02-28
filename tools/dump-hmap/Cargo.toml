@@ -1,0 +1,13 @@
+[package]
+name = "dump-hmap"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dump_hmap"
+path = "src/main.rs"
+
+[dependencies]
+xcbuild-hmap = { path = "../../crates/xcbuild-hmap" }
+clap.workspace = true
+anyhow.workspace = true

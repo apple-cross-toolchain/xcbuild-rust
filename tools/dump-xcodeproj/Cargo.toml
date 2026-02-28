@@ -1,0 +1,12 @@
+[package]
+name = "dump-xcodeproj"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dump_xcodeproj"
+path = "src/main.rs"
+
+[dependencies]
+xcbuild-pbxproj = { path = "../../crates/xcbuild-pbxproj" }
+plist.workspace = true

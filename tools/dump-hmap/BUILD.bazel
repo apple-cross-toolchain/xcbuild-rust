@@ -1,0 +1,12 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+rust_binary(
+    name = "dump_hmap",
+    srcs = ["src/main.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/xcbuild-hmap",
+        "@crates//:anyhow",
+        "@crates//:clap",
+    ],
+)

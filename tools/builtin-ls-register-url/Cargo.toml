@@ -1,0 +1,10 @@
+[package]
+name = "builtin-ls-register-url"
+version = "0.1.0"
+edition = "2021"
+[[bin]]
+name = "builtin-lsRegisterURL"
+path = "src/main.rs"
+
+[dependencies]
+xcbuild-builtin = { path = "../../crates/xcbuild-builtin" }

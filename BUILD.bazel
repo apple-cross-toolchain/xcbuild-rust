@@ -1,0 +1,38 @@
+load("@rules_pkg//:pkg.bzl", "pkg_tar")
+
+exports_files([
+    "Cargo.toml",
+    "Cargo.lock",
+])
+
+pkg_tar(
+    name = "xcbuild",
+    srcs = [
+        "//tools/actool",
+        "//tools/builtin-copy",
+        "//tools/builtin-copy-plist:builtin-copyPlist",
+        "//tools/builtin-copy-strings:builtin-copyStrings",
+        "//tools/builtin-copy-tiff:builtin-copyTiff",
+        "//tools/builtin-embedded-binary-validation-utility:builtin-embeddedBinaryValidationUtility",
+        "//tools/builtin-info-plist-utility:builtin-infoPlistUtility",
+        "//tools/builtin-ls-register-url:builtin-lsRegisterURL",
+        "//tools/builtin-product-packaging-utility:builtin-productPackagingUtility",
+        "//tools/builtin-validation-utility:builtin-validationUtility",
+        "//tools/dependency-info-tool",
+        "//tools/dump-bom:dump_bom",
+        "//tools/dump-car:dump_car",
+        "//tools/dump-dependency:dump_dependency",
+        "//tools/dump-hmap:dump_hmap",
+        "//tools/dump-xcassets:dump_xcassets",
+        "//tools/dump-xcconfig:dump_xcconfig",
+        "//tools/dump-xcodeproj:dump_xcodeproj",
+        "//tools/dump-xcspec:dump_xcspec",
+        "//tools/dump-xcworkspace:dump_xcworkspace",
+        "//tools/lsbom",
+        "//tools/plist-buddy:PlistBuddy",
+        "//tools/plutil",
+        "//tools/xcode-select",
+        "//tools/xcrun",
+    ],
+    extension = "tar.xz",
+)

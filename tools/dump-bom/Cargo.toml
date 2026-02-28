@@ -1,0 +1,13 @@
+[package]
+name = "dump-bom"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dump_bom"
+path = "src/main.rs"
+
+[dependencies]
+xcbuild-bom = { path = "../../crates/xcbuild-bom" }
+clap.workspace = true
+anyhow.workspace = true

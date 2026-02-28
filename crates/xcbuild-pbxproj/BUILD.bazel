@@ -1,0 +1,18 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "xcbuild-pbxproj",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/xcbuild-plist",
+        "@crates//:anyhow",
+        "@crates//:plist",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_test(
+    name = "test",
+    crate = ":xcbuild-pbxproj",
+)

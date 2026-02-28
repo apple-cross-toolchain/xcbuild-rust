@@ -1,0 +1,11 @@
+[package]
+name = "dump-xcassets"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dump_xcassets"
+path = "src/main.rs"
+
+[dependencies]
+xcbuild-xcassets = { path = "../../crates/xcbuild-xcassets" }

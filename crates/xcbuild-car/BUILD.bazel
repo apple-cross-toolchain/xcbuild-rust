@@ -1,0 +1,18 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "xcbuild-car",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/xcbuild-bom",
+        "@crates//:byteorder",
+        "@crates//:flate2",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_test(
+    name = "test",
+    crate = ":xcbuild-car",
+)

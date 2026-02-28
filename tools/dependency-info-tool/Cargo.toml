@@ -1,0 +1,9 @@
+[package]
+name = "dependency-info-tool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+xcbuild-dependency = { path = "../../crates/xcbuild-dependency" }
+clap.workspace = true
+anyhow.workspace = true

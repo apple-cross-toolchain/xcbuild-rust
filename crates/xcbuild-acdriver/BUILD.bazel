@@ -1,0 +1,18 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "xcbuild-acdriver",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/xcbuild-car",
+        "//crates/xcbuild-plist",
+        "//crates/xcbuild-xcassets",
+        "@crates//:plist",
+    ],
+)
+
+rust_test(
+    name = "test",
+    crate = ":xcbuild-acdriver",
+)

@@ -1,0 +1,11 @@
+[package]
+name = "dump-xcworkspace"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dump_xcworkspace"
+path = "src/main.rs"
+
+[dependencies]
+xcbuild-xcworkspace = { path = "../../crates/xcbuild-xcworkspace" }

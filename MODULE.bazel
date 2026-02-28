@@ -1,0 +1,14 @@
+module(name = "xcbuild-rust", version = "0.1.0")
+
+bazel_dep(name = "rules_rust", version = "0.69.0")
+bazel_dep(name = "rules_pkg", version = "1.2.0")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = ["//:Cargo.toml"],
+)
+
+use_repo(crate, "crates")

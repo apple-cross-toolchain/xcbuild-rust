@@ -1,0 +1,11 @@
+[package]
+name = "dump-xcconfig"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dump_xcconfig"
+path = "src/main.rs"
+
+[dependencies]
+xcbuild-pbxsetting = { path = "../../crates/xcbuild-pbxsetting" }

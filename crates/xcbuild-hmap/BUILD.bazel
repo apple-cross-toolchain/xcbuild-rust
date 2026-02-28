@@ -1,0 +1,16 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "xcbuild-hmap",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:byteorder",
+        "@crates//:thiserror",
+    ],
+)
+
+rust_test(
+    name = "test",
+    crate = ":xcbuild-hmap",
+)

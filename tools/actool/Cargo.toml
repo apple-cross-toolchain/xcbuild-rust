@@ -1,0 +1,7 @@
+[package]
+name = "actool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+xcbuild-acdriver = { path = "../../crates/xcbuild-acdriver" }

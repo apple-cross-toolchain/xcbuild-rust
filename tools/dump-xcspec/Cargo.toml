@@ -1,0 +1,11 @@
+[package]
+name = "dump-xcspec"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dump_xcspec"
+path = "src/main.rs"
+
+[dependencies]
+xcbuild-pbxspec = { path = "../../crates/xcbuild-pbxspec" }

@@ -1,0 +1,13 @@
+[package]
+name = "dump-dependency"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dump_dependency"
+path = "src/main.rs"
+
+[dependencies]
+xcbuild-dependency = { path = "../../crates/xcbuild-dependency" }
+clap.workspace = true
+anyhow.workspace = true

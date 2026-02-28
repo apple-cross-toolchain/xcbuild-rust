@@ -1,0 +1,9 @@
+[package]
+name = "lsbom"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+xcbuild-bom = { path = "../../crates/xcbuild-bom" }
+clap.workspace = true
+anyhow.workspace = true

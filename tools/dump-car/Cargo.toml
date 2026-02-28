@@ -1,0 +1,11 @@
+[package]
+name = "dump-car"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dump_car"
+path = "src/main.rs"
+
+[dependencies]
+xcbuild-car = { path = "../../crates/xcbuild-car" }
