@@ -32,6 +32,18 @@ pub struct Options {
     pub export_dependency_info: Option<String>,
     pub compress_pngs: bool,
     pub optimization: Option<String>,
+    pub accent_color: Option<String>,
+    pub widget_background_color: Option<String>,
+    pub include_all_app_icons: bool,
+    pub alternate_app_icons: Vec<String>,
+    pub skip_app_store_deployment: bool,
+    pub standalone_icon_behavior: Option<String>,
+    pub include_sticker_content: bool,
+    pub stickers_icon_role: Option<String>,
+    pub target_name: Option<String>,
+    pub flattened_app_icon_path: Option<String>,
+    pub filter_for_device_model: Option<String>,
+    pub filter_for_device_os_version: Option<String>,
     pub inputs: Vec<String>,
 }
 
@@ -56,6 +68,18 @@ impl Options {
             export_dependency_info: None,
             compress_pngs: false,
             optimization: None,
+            accent_color: None,
+            widget_background_color: None,
+            include_all_app_icons: false,
+            alternate_app_icons: Vec::new(),
+            skip_app_store_deployment: false,
+            standalone_icon_behavior: None,
+            include_sticker_content: false,
+            stickers_icon_role: None,
+            target_name: None,
+            flattened_app_icon_path: None,
+            filter_for_device_model: None,
+            filter_for_device_os_version: None,
             inputs: Vec::new(),
         };
 
@@ -157,15 +181,77 @@ impl Options {
                     }
                     opts.optimization = Some(args[i].clone());
                 }
+                "--accent-color" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err("missing value for --accent-color".into());
+                    }
+                    opts.accent_color = Some(args[i].clone());
+                }
+                "--widget-background-color" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err("missing value for --widget-background-color".into());
+                    }
+                    opts.widget_background_color = Some(args[i].clone());
+                }
+                "--include-all-app-icons" => opts.include_all_app_icons = true,
+                "--alternate-app-icon" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err("missing value for --alternate-app-icon".into());
+                    }
+                    opts.alternate_app_icons.push(args[i].clone());
+                }
+                "--skip-app-store-deployment" => opts.skip_app_store_deployment = true,
+                "--standalone-icon-behavior" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err("missing value for --standalone-icon-behavior".into());
+                    }
+                    opts.standalone_icon_behavior = Some(args[i].clone());
+                }
+                "--include-sticker-content" => opts.include_sticker_content = true,
+                "--stickers-icon-role" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err("missing value for --stickers-icon-role".into());
+                    }
+                    opts.stickers_icon_role = Some(args[i].clone());
+                }
+                "--target-name" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err("missing value for --target-name".into());
+                    }
+                    opts.target_name = Some(args[i].clone());
+                }
+                "--flattened-app-icon-path" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err("missing value for --flattened-app-icon-path".into());
+                    }
+                    opts.flattened_app_icon_path = Some(args[i].clone());
+                }
+                "--filter-for-device-model" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err("missing value for --filter-for-device-model".into());
+                    }
+                    opts.filter_for_device_model = Some(args[i].clone());
+                }
+                "--filter-for-device-os-version" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err("missing value for --filter-for-device-os-version".into());
+                    }
+                    opts.filter_for_device_os_version = Some(args[i].clone());
+                }
                 // Skip other unsupported options that take values
                 "--sticker-pack-identifier-prefix"
                 | "--sticker-pack-strings-file"
                 | "--leaderboard-identifier-prefix"
                 | "--leaderboard-set-identifier-prefix"
-                | "--flattened-app-icon-path"
-                | "--target-name"
-                | "--filter-for-device-model"
-                | "--filter-for-device-os-version"
                 | "--asset-pack-output-specifications" => {
                     i += 1; // skip value
                 }
@@ -173,10 +259,10 @@ impl Options {
                     i += 1; // skip value
                 }
                 _ => {
-                    if !args[i].starts_with('-') {
-                        opts.inputs.push(args[i].clone());
+                    if args[i].starts_with('-') {
+                        return Err(format!("unknown argument {}", args[i]));
                     }
-                    // Silently ignore unknown flags
+                    opts.inputs.push(args[i].clone());
                 }
             }
             i += 1;
@@ -193,6 +279,7 @@ pub struct ActoolResult {
     pub warnings: Vec<Message>,
     pub notices: Vec<Message>,
     pub output_files: Vec<String>,
+    pub version: Option<plist::Dictionary>,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +295,7 @@ impl ActoolResult {
             warnings: Vec::new(),
             notices: Vec::new(),
             output_files: Vec::new(),
+            version: None,
         }
     }
 
@@ -252,6 +340,13 @@ impl ActoolResult {
             dict.insert(
                 "com.apple.actool.compilation-results".to_string(),
                 Value::Dictionary(compilation),
+            );
+        }
+
+        if let Some(version) = &self.version {
+            dict.insert(
+                "com.apple.actool.version".to_string(),
+                Value::Dictionary(version.clone()),
             );
         }
 
@@ -339,6 +434,16 @@ pub fn run(args: &[String]) -> i32 {
             description: "actool version 1 (xcbuild)".to_string(),
             failure_reason: None,
         });
+        let mut version_dict = plist::Dictionary::new();
+        version_dict.insert(
+            "bundle-version".to_string(),
+            Value::String("1".to_string()),
+        );
+        version_dict.insert(
+            "short-bundle-version".to_string(),
+            Value::String("1.0".to_string()),
+        );
+        result.version = Some(version_dict);
     } else if opts.print_contents {
         // Print asset catalog contents
         for input in &opts.inputs {
@@ -398,7 +503,30 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 
+fn warn_unsupported_options(opts: &Options) {
+    if opts.include_sticker_content {
+        eprintln!("warning: --include-sticker-content is not yet implemented");
+    }
+    if opts.stickers_icon_role.is_some() {
+        eprintln!("warning: --stickers-icon-role is not yet implemented");
+    }
+    if opts.standalone_icon_behavior.is_some() {
+        eprintln!("warning: --standalone-icon-behavior is not yet implemented");
+    }
+    if opts.widget_background_color.is_some() {
+        eprintln!("warning: --widget-background-color is not yet implemented");
+    }
+    if opts.filter_for_device_model.is_some() {
+        eprintln!("warning: --filter-for-device-model is not yet implemented");
+    }
+    if opts.filter_for_device_os_version.is_some() {
+        eprintln!("warning: --filter-for-device-os-version is not yet implemented");
+    }
+}
+
 fn run_compile(opts: &Options, compile_path: &str, result: &mut ActoolResult) {
+    warn_unsupported_options(opts);
+
     let output_dir = Path::new(compile_path);
     if let Err(e) = fs::create_dir_all(output_dir) {
         result.errors.push(Message {
@@ -482,6 +610,14 @@ fn run_compile(opts: &Options, compile_path: &str, result: &mut ActoolResult) {
             info_dict.insert(
                 "UILaunchImageName".to_string(),
                 Value::String(launch.clone()),
+            );
+        }
+
+        // Add accent color name if specified
+        if let Some(accent) = &opts.accent_color {
+            info_dict.insert(
+                "NSAccentColorName".to_string(),
+                Value::String(accent.clone()),
             );
         }
 
