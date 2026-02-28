@@ -193,6 +193,66 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 
+    // Expand build settings if requested
+    if opts.expand_build_settings {
+        expand_build_settings(&mut value);
+    }
+
+    // Inject build environment entries
+    if let plist::Value::Dictionary(ref mut dict) = value {
+        let env_mappings = [
+            ("DTCompiler", "DEFAULT_COMPILER"),
+            ("DTXcode", "XCODE_VERSION_ACTUAL"),
+            ("DTXcodeBuild", "XCODE_PRODUCT_BUILD_VERSION"),
+            ("BuildMachineOSBuild", "MAC_OS_X_PRODUCT_BUILD_VERSION"),
+            ("DTPlatformName", "PLATFORM_NAME"),
+            ("DTPlatformBuild", "PLATFORM_PRODUCT_BUILD_VERSION"),
+            ("DTSDKName", "SDK_NAME"),
+            ("DTSDKBuild", "SDK_PRODUCT_BUILD_VERSION"),
+        ];
+
+        for (plist_key, env_key) in &env_mappings {
+            if let Ok(val) = std::env::var(env_key) {
+                dict.insert(plist_key.to_string(), plist::Value::String(val));
+            }
+        }
+
+        // DTPlatformVersion (always empty string if not set)
+        if !dict.contains_key("DTPlatformVersion") {
+            dict.insert("DTPlatformVersion".to_string(), plist::Value::String(String::new()));
+        }
+
+        // MinimumOSVersion from DEPLOYMENT_TARGET_SETTING_NAME indirection
+        if let Ok(setting_name) = std::env::var("DEPLOYMENT_TARGET_SETTING_NAME") {
+            if let Ok(val) = std::env::var(&setting_name) {
+                dict.insert("MinimumOSVersion".to_string(), plist::Value::String(val));
+            }
+        }
+
+        // UIDeviceFamily from TARGETED_DEVICE_FAMILY
+        if let Ok(families) = std::env::var("TARGETED_DEVICE_FAMILY") {
+            let family_values: Vec<plist::Value> = families
+                .split(',')
+                .filter_map(|s| s.trim().parse::<i64>().ok())
+                .map(|n| plist::Value::Integer(n.into()))
+                .collect();
+            if !family_values.is_empty() {
+                dict.insert("UIDeviceFamily".to_string(), plist::Value::Array(family_values));
+            }
+        }
+    }
+
+    // Copy resource rules file if specified
+    if let Some(resource_rules) = &opts.resource_rules_file {
+        if let Ok(rules_path) = std::env::var("CODE_SIGN_RESOURCE_RULES_PATH") {
+            if !rules_path.is_empty() {
+                if let Err(e) = fs::copy(&rules_path, resource_rules) {
+                    eprintln!("warning: failed to copy resource rules: {e}");
+                }
+            }
+        }
+    }
+
     // Determine output format
     let out_format = if let Some(fmt) = &opts.format {
         match fmt.as_str() {
@@ -228,11 +288,11 @@ pub fn run(args: &[String]) -> i32 {
     if let Some(pkg_info_path) = &opts.gen_pkg_info {
         if let plist::Value::Dictionary(ref dict) = value {
             let pkg_type = match dict.get("CFBundlePackageType") {
-                Some(plist::Value::String(s)) => s.clone(),
+                Some(plist::Value::String(s)) if s.len() == 4 => s.clone(),
                 _ => "????".to_string(),
             };
             let signature = match dict.get("CFBundleSignature") {
-                Some(plist::Value::String(s)) => s.clone(),
+                Some(plist::Value::String(s)) if s.len() == 4 => s.clone(),
                 _ => "????".to_string(),
             };
             let pkg_info = format!("{pkg_type}{signature}");
@@ -247,4 +307,54 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     0
+}
+
+fn expand_build_settings(value: &mut plist::Value) {
+    match value {
+        plist::Value::String(s) => {
+            let expanded = expand_build_settings_string(s);
+            if expanded != *s {
+                *s = expanded;
+            }
+        }
+        plist::Value::Dictionary(dict) => {
+            for (_, v) in dict.iter_mut() {
+                expand_build_settings(v);
+            }
+        }
+        plist::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                expand_build_settings(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn expand_build_settings_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            if let Some(&next) = chars.peek() {
+                if next == '(' || next == '{' {
+                    let close = if next == '(' { ')' } else { '}' };
+                    chars.next(); // consume ( or {
+                    let mut var_name = String::new();
+                    for c in chars.by_ref() {
+                        if c == close {
+                            break;
+                        }
+                        var_name.push(c);
+                    }
+                    if let Ok(val) = std::env::var(&var_name) {
+                        result.push_str(&val);
+                    }
+                    continue;
+                }
+            }
+        }
+        result.push(ch);
+    }
+    result
 }
