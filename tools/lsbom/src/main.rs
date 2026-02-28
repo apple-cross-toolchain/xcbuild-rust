@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::{self, Write};
 use xcbuild_bom::paths::{FileKey, PathInfo1, PathInfo2, PathType};
 use xcbuild_bom::Bom;
 
@@ -37,12 +38,82 @@ struct Options {
     no_modes: bool,
     print_format: Option<Vec<PrintItem>>,
     arch: Option<String>,
-    input: Option<String>,
+    inputs: Vec<String>,
 }
 
-fn parse_print_format(s: &str) -> Option<Vec<PrintItem>> {
+/// Resolves UIDs to user names and GIDs to group names by reading /etc/passwd and /etc/group.
+struct NameLookup {
+    users: HashMap<u32, String>,
+    groups: HashMap<u32, String>,
+}
+
+impl NameLookup {
+    fn new() -> Self {
+        let mut lookup = NameLookup {
+            users: HashMap::new(),
+            groups: HashMap::new(),
+        };
+        lookup.load_passwd();
+        lookup.load_group();
+        lookup
+    }
+
+    fn load_passwd(&mut self) {
+        if let Ok(contents) = fs::read_to_string("/etc/passwd") {
+            for line in contents.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 3 {
+                    if let Ok(uid) = parts[2].parse::<u32>() {
+                        self.users.insert(uid, parts[0].to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    fn load_group(&mut self) {
+        if let Ok(contents) = fs::read_to_string("/etc/group") {
+            for line in contents.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 3 {
+                    if let Ok(gid) = parts[2].parse::<u32>() {
+                        self.groups.insert(gid, parts[0].to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    fn resolve_user(&self, uid: u32) -> String {
+        match self.users.get(&uid) {
+            Some(name) => name.clone(),
+            None => uid.to_string(),
+        }
+    }
+
+    fn resolve_group(&self, gid: u32) -> String {
+        match self.groups.get(&gid) {
+            Some(name) => name.clone(),
+            None => gid.to_string(),
+        }
+    }
+}
+
+fn parse_print_format(s: &str) -> Result<Vec<PrintItem>, String> {
     let mut format = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for c in s.chars() {
+        if !seen.insert(c) {
+            return Err(format!("duplicate format character '{c}'"));
+        }
         match c {
             'c' => format.push(PrintItem::Checksum),
             'f' => format.push(PrintItem::FileName),
@@ -59,10 +130,10 @@ fn parse_print_format(s: &str) -> Option<Vec<PrintItem>> {
             'U' => format.push(PrintItem::UserName),
             '/' => format.push(PrintItem::UserGroupID),
             '?' => format.push(PrintItem::UserGroupName),
-            _ => return None,
+            _ => return Err(format!("invalid print format character '{c}'")),
         }
     }
-    Some(format)
+    Ok(format)
 }
 
 fn help(error: Option<&str>) -> ! {
@@ -118,7 +189,7 @@ fn parse_options(args: &[String]) -> Options {
         no_modes: false,
         print_format: None,
         arch: None,
-        input: None,
+        inputs: Vec::new(),
     };
 
     let mut i = 0;
@@ -132,8 +203,10 @@ fn parse_options(args: &[String]) -> Options {
             if i < args.len() {
                 opts.arch = Some(args[i].clone());
             }
+        } else if let Some(value) = arg.strip_prefix("--arch=") {
+            opts.arch = Some(value.to_string());
         } else if arg.is_empty() || !arg.starts_with('-') {
-            opts.input = Some(arg.clone());
+            opts.inputs.push(arg.clone());
         } else {
             let chars: Vec<char> = arg.chars().skip(1).collect();
             let mut j = 0;
@@ -151,19 +224,21 @@ fn parse_options(args: &[String]) -> Options {
                     'p' => {
                         if j + 1 < chars.len() {
                             let remaining: String = chars[j + 1..].iter().collect();
-                            opts.print_format = parse_print_format(&remaining);
-                            if opts.print_format.is_none() {
-                                help(Some(&format!("invalid print format {remaining}")));
+                            match parse_print_format(&remaining) {
+                                Ok(fmt) => opts.print_format = Some(fmt),
+                                Err(e) => help(Some(&e)),
                             }
                             j = chars.len();
                             continue;
                         } else {
                             i += 1;
                             if i < args.len() {
-                                opts.print_format = parse_print_format(&args[i]);
-                                if opts.print_format.is_none() {
-                                    help(Some(&format!("invalid print format {}", args[i])));
+                                match parse_print_format(&args[i]) {
+                                    Ok(fmt) => opts.print_format = Some(fmt),
+                                    Err(e) => help(Some(&e)),
                                 }
+                            } else {
+                                help(Some("-p requires a format argument"));
                             }
                         }
                     }
@@ -183,18 +258,58 @@ fn format_permissions_text(mode: u16, path_type: PathType) -> String {
     s.push(match path_type {
         PathType::Directory => 'd',
         PathType::Link => 'l',
-        PathType::Device => 'b',
-        PathType::File => '-',
+        PathType::Device => {
+            // Check if it's a character device (mode & 0o020000 for char special)
+            // or block device. For BOM, block devices typically have the directory bit set.
+            if mode & 0x4000 != 0 {
+                'b'
+            } else {
+                'c'
+            }
+        }
+        PathType::File => {
+            // Check for socket
+            if mode & 0xF000 == 0xC000 {
+                's'
+            } else {
+                '-'
+            }
+        }
     });
+
+    // Owner read/write
     s.push(if mode & 0o400 != 0 { 'r' } else { '-' });
     s.push(if mode & 0o200 != 0 { 'w' } else { '-' });
-    s.push(if mode & 0o100 != 0 { 'x' } else { '-' });
+
+    // Owner execute with setuid
+    if mode & 0o4000 != 0 {
+        s.push(if mode & 0o100 != 0 { 's' } else { 'S' });
+    } else {
+        s.push(if mode & 0o100 != 0 { 'x' } else { '-' });
+    }
+
+    // Group read/write
     s.push(if mode & 0o040 != 0 { 'r' } else { '-' });
     s.push(if mode & 0o020 != 0 { 'w' } else { '-' });
-    s.push(if mode & 0o010 != 0 { 'x' } else { '-' });
+
+    // Group execute with setgid
+    if mode & 0o2000 != 0 {
+        s.push(if mode & 0o010 != 0 { 's' } else { 'S' });
+    } else {
+        s.push(if mode & 0o010 != 0 { 'x' } else { '-' });
+    }
+
+    // Other read/write
     s.push(if mode & 0o004 != 0 { 'r' } else { '-' });
     s.push(if mode & 0o002 != 0 { 'w' } else { '-' });
-    s.push(if mode & 0o001 != 0 { 'x' } else { '-' });
+
+    // Other execute with sticky bit
+    if mode & 0o1000 != 0 {
+        s.push(if mode & 0o001 != 0 { 't' } else { 'T' });
+    } else {
+        s.push(if mode & 0o001 != 0 { 'x' } else { '-' });
+    }
+
     s
 }
 
@@ -210,8 +325,57 @@ fn format_size_human(size: u32) -> String {
     }
 }
 
-fn print_entry(path: &str, path_info_2: &PathInfo2, format: &[PrintItem]) {
+fn format_timestamp(epoch: u32) -> String {
+    unsafe {
+        let time = epoch as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&time, &mut tm).is_null() {
+            return epoch.to_string();
+        }
+        let mut buf = [0u8; 64];
+        let fmt = b"%a %b %e %H:%M:%S %Y\0";
+        let len = libc::strftime(
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            fmt.as_ptr() as *const libc::c_char,
+            &tm,
+        );
+        if len == 0 {
+            return epoch.to_string();
+        }
+        String::from_utf8_lossy(&buf[..len]).to_string()
+    }
+}
+
+/// Write a line to stdout, handling BrokenPipe gracefully.
+fn write_line(output: &str) {
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    if writeln!(handle, "{output}").is_err() {
+        // BrokenPipe or other write error - exit cleanly
+        std::process::exit(0);
+    }
+}
+
+/// Write a partial line to stdout, handling BrokenPipe gracefully.
+fn write_str(output: &str) {
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    if write!(handle, "{output}").is_err() {
+        std::process::exit(0);
+    }
+}
+
+fn print_entry(
+    path: &str,
+    path_info_2: &PathInfo2,
+    format: &[PrintItem],
+    name_lookup: &NameLookup,
+) {
     let mut output = String::new();
+    let pt = path_info_2.path_type();
+    let is_file_or_link = pt == PathType::File || pt == PathType::Link;
+
     for (i, item) in format.iter().enumerate() {
         if i > 0 {
             output.push('\t');
@@ -220,17 +384,25 @@ fn print_entry(path: &str, path_info_2: &PathInfo2, format: &[PrintItem]) {
             PrintItem::FileName => output.push_str(path),
             PrintItem::FileNameQuoted => {
                 output.push('"');
-                output.push_str(path);
+                // Escape embedded double quotes with backslash
+                for ch in path.chars() {
+                    if ch == '"' {
+                        output.push('\\');
+                    }
+                    output.push(ch);
+                }
                 output.push('"');
             }
             PrintItem::Checksum => {
-                let _ = write!(output, "{}", path_info_2.checksum);
+                if is_file_or_link {
+                    let _ = write!(output, "{}", path_info_2.checksum);
+                }
             }
             PrintItem::GroupID => {
                 let _ = write!(output, "{}", path_info_2.group);
             }
             PrintItem::GroupName => {
-                let _ = write!(output, "{}", path_info_2.group);
+                output.push_str(&name_lookup.resolve_group(path_info_2.group));
             }
             PrintItem::Permissions => {
                 let _ = write!(output, "{:o}", path_info_2.mode);
@@ -242,32 +414,45 @@ fn print_entry(path: &str, path_info_2: &PathInfo2, format: &[PrintItem]) {
                 ));
             }
             PrintItem::FileSize => {
-                let _ = write!(output, "{}", path_info_2.size);
+                if is_file_or_link {
+                    let _ = write!(output, "{}", path_info_2.size);
+                }
             }
             PrintItem::FileSizeFormatted => {
-                output.push_str(&format_size_human(path_info_2.size));
+                if is_file_or_link {
+                    output.push_str(&format_size_human(path_info_2.size));
+                }
             }
             PrintItem::ModificationTime => {
-                let _ = write!(output, "{}", path_info_2.modtime);
+                if is_file_or_link {
+                    let _ = write!(output, "{}", path_info_2.modtime);
+                }
             }
             PrintItem::ModificationTimeFormatted => {
-                let _ = write!(output, "{}", path_info_2.modtime);
+                if is_file_or_link {
+                    output.push_str(&format_timestamp(path_info_2.modtime));
+                }
             }
             PrintItem::UserID => {
                 let _ = write!(output, "{}", path_info_2.user);
             }
             PrintItem::UserName => {
-                let _ = write!(output, "{}", path_info_2.user);
+                output.push_str(&name_lookup.resolve_user(path_info_2.user));
             }
             PrintItem::UserGroupID => {
                 let _ = write!(output, "{}/{}", path_info_2.user, path_info_2.group);
             }
             PrintItem::UserGroupName => {
-                let _ = write!(output, "{}/{}", path_info_2.user, path_info_2.group);
+                let _ = write!(
+                    output,
+                    "{}/{}",
+                    name_lookup.resolve_user(path_info_2.user),
+                    name_lookup.resolve_group(path_info_2.group)
+                );
             }
         }
     }
-    println!("{output}");
+    write_line(&output);
 }
 
 fn arch_to_cpu_type(arch: &str) -> Option<u16> {
@@ -292,10 +477,9 @@ fn main() -> Result<()> {
         help(None);
     }
 
-    let input = match &options.input {
-        Some(i) => i.clone(),
-        None => help(Some("input is required")),
-    };
+    if options.inputs.is_empty() {
+        help(Some("input is required"));
+    }
 
     let include_all = !options.include_block_devices
         && !options.include_character_devices
@@ -303,111 +487,146 @@ fn main() -> Result<()> {
         && !options.include_files
         && !options.include_symbolic_links;
 
-    let data = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
-    let bom = Bom::load(data).with_context(|| "failed to load BOM")?;
+    // Build name lookup for user/group resolution
+    let name_lookup = NameLookup::new();
 
-    let entries = bom
-        .tree_entries("Paths")
-        .with_context(|| "failed to load paths tree")?;
+    for input in &options.inputs {
+        let data = fs::read(input).with_context(|| format!("failed to read {input}"))?;
+        let bom = Bom::load(data).with_context(|| "failed to load BOM")?;
 
-    // Map from id -> (parent, name)
-    let mut files: HashMap<u32, (u32, String)> = HashMap::new();
+        let entries = bom
+            .tree_entries("Paths")
+            .with_context(|| "failed to load paths tree")?;
 
-    for entry in &entries {
-        let file_key = match FileKey::from_bytes(&entry.key) {
-            Some(fk) => fk,
-            None => continue,
-        };
-        let path_info_1 = match PathInfo1::from_bytes(&entry.value) {
-            Some(pi) => pi,
-            None => continue,
-        };
+        // Map from id -> (parent, name)
+        let mut files: HashMap<u32, (u32, String)> = HashMap::new();
 
-        files.insert(path_info_1.id, (file_key.parent, file_key.name.clone()));
+        // Collect all entries into a vec for sorting
+        let mut collected: Vec<(String, PathInfo2)> = Vec::new();
 
-        // Get secondary path info
-        let path_info_2_data = match bom.index_get(path_info_1.index) {
-            Some(d) => d,
-            None => {
-                eprintln!("error: failed to get secondary path info");
-                continue;
-            }
-        };
+        for entry in &entries {
+            let file_key = match FileKey::from_bytes(&entry.key) {
+                Some(fk) => fk,
+                None => continue,
+            };
+            let path_info_1 = match PathInfo1::from_bytes(&entry.value) {
+                Some(pi) => pi,
+                None => continue,
+            };
 
-        let path_info_2 = match PathInfo2::from_bytes(path_info_2_data) {
-            Some(pi) => pi,
-            None => continue,
-        };
+            files.insert(path_info_1.id, (file_key.parent, file_key.name.clone()));
 
-        // Filter by type
-        if !include_all {
-            match path_info_2.path_type() {
-                PathType::File => {
-                    if !options.include_files {
-                        continue;
-                    }
+            // Get secondary path info
+            let path_info_2_data = match bom.index_get(path_info_1.index) {
+                Some(d) => d,
+                None => {
+                    eprintln!("error: failed to get secondary path info");
+                    continue;
                 }
-                PathType::Directory => {
-                    if !options.include_directories {
-                        continue;
-                    }
-                }
-                PathType::Link => {
-                    if !options.include_symbolic_links {
-                        continue;
-                    }
-                }
-                PathType::Device => {
-                    if path_info_2.mode & 0x4000 != 0 {
-                        if !options.include_block_devices {
+            };
+
+            let path_info_2 = match PathInfo2::from_bytes(path_info_2_data) {
+                Some(pi) => pi,
+                None => continue,
+            };
+
+            // Filter by type
+            if !include_all {
+                match path_info_2.path_type() {
+                    PathType::File => {
+                        if !options.include_files {
                             continue;
                         }
-                    } else if !options.include_character_devices {
-                        continue;
+                    }
+                    PathType::Directory => {
+                        if !options.include_directories {
+                            continue;
+                        }
+                    }
+                    PathType::Link => {
+                        if !options.include_symbolic_links {
+                            continue;
+                        }
+                    }
+                    PathType::Device => {
+                        if path_info_2.mode & 0x4000 != 0 {
+                            if !options.include_block_devices {
+                                continue;
+                            }
+                        } else if !options.include_character_devices {
+                            continue;
+                        }
                     }
                 }
             }
-        }
 
-        // Filter by architecture
-        if let Some(ref arch_name) = options.arch {
-            if path_info_2.path_type() == PathType::File {
-                if let Some(cpu_type) = arch_to_cpu_type(arch_name) {
-                    if path_info_2.architecture != 0 && path_info_2.architecture != cpu_type {
-                        continue;
+            // Filter by architecture
+            if let Some(ref arch_name) = options.arch {
+                if path_info_2.path_type() == PathType::File {
+                    if let Some(cpu_type) = arch_to_cpu_type(arch_name) {
+                        if path_info_2.architecture != 0 && path_info_2.architecture != cpu_type {
+                            continue;
+                        }
                     }
                 }
             }
+
+            // Build full path
+            let path = xcbuild_bom::paths::resolve_path(&file_key, &files);
+
+            collected.push((path, path_info_2));
         }
 
-        // Build full path
-        let path = xcbuild_bom::paths::resolve_path(&file_key, &files);
+        // Sort entries alphabetically by path
+        collected.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if let Some(ref format) = options.print_format {
-            print_entry(&path, &path_info_2, format);
-        } else if options.only_path {
-            println!("{path}");
-        } else {
-            print!("{path}");
+        // Print sorted entries
+        for (path, path_info_2) in &collected {
+            if let Some(ref format) = options.print_format {
+                print_entry(path, path_info_2, format, &name_lookup);
+            } else if options.only_path {
+                write_line(path);
+            } else {
+                write_str(path);
 
-            if !options.no_modes {
-                let mode = format!("{:o}", path_info_2.mode);
-                let uid = path_info_2.user.to_string();
-                let gid = path_info_2.group.to_string();
-                print!("\t{mode}\t{uid}/{gid}");
+                let pt = path_info_2.path_type();
+
+                // no_modes only suppresses modes for Directory and Link entries
+                let suppress_modes =
+                    options.no_modes && (pt == PathType::Directory || pt == PathType::Link);
+
+                if !suppress_modes {
+                    let mode = format!("{:o}", path_info_2.mode);
+                    let uid = path_info_2.user.to_string();
+                    let gid = path_info_2.group.to_string();
+                    write_str(&format!("\t{mode}\t{uid}/{gid}"));
+                }
+
+                match pt {
+                    PathType::File => {
+                        let size = path_info_2.size.to_string();
+                        let checksum = path_info_2.checksum.to_string();
+                        write_str(&format!("\t{size}\t{checksum}"));
+                    }
+                    PathType::Link => {
+                        let size = path_info_2.size.to_string();
+                        let checksum = path_info_2.checksum.to_string();
+                        let link_target = &path_info_2.link_name;
+                        write_str(&format!("\t{size}\t{checksum}\t{link_target}"));
+                    }
+                    PathType::Device => {
+                        let dev = path_info_2.size; // device number stored in size field
+                        write_str(&format!("\t{dev}"));
+                    }
+                    PathType::Directory => {}
+                }
+
+                if options.print_mtime {
+                    write_str(&format!("\t{}", path_info_2.modtime));
+                }
+
+                write_line("");
             }
-
-            if path_info_2.path_type() == PathType::File {
-                let size = path_info_2.size.to_string();
-                let checksum = path_info_2.checksum.to_string();
-                print!("\t{size}\t{checksum}");
-            }
-
-            if options.print_mtime {
-                print!("\t{}", path_info_2.modtime);
-            }
-
-            println!();
         }
     }
 

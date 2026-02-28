@@ -7,3 +7,4 @@ edition = "2021"
 xcbuild-bom = { path = "../../crates/xcbuild-bom" }
 clap.workspace = true
 anyhow.workspace = true
+libc = "0.2"
