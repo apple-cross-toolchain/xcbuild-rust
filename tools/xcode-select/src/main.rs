@@ -96,8 +96,24 @@ fn main() {
     }
 
     if install {
-        eprintln!("error: install not implemented");
-        process::exit(1);
+        #[cfg(target_os = "macos")]
+        {
+            let status = process::Command::new("/usr/bin/xcode-select")
+                .arg("--install")
+                .status();
+            match status {
+                Ok(s) => process::exit(s.code().unwrap_or(1)),
+                Err(e) => {
+                    eprintln!("error: failed to launch xcode-select --install: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            eprintln!("error: xcode-select --install is only supported on macOS");
+            process::exit(1);
+        }
     }
 
     help(Some("no actions provided"));

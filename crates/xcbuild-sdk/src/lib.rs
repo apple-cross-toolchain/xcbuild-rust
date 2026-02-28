@@ -125,22 +125,22 @@ pub fn find_developer_root() -> Option<String> {
 pub fn write_developer_root(path: Option<&str>) -> bool {
     let link_path = "/var/db/xcode_select_link";
 
-    let path = match path {
-        Some(p) => p,
-        None => return false,
-    };
-
-    let resolved = resolve_developer_root(path);
-    if !Path::new(&resolved).exists() {
-        eprintln!("error: invalid developer directory: '{path}'");
-        return false;
-    }
-
-    // Remove existing link
+    // Remove existing link if present
     if Path::new(link_path).exists() || fs::symlink_metadata(link_path).is_ok() {
         if fs::remove_file(link_path).is_err() {
             return false;
         }
+    }
+
+    let path = match path {
+        Some(p) => p,
+        None => return true,  // Reset: just remove the link
+    };
+
+    let resolved = resolve_developer_root(path);
+    if !Path::new(&resolved).is_dir() {
+        eprintln!("error: invalid developer directory: '{path}'");
+        return false;
     }
 
     // Create /var/db if needed
