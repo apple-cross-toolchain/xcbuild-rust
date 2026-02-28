@@ -134,7 +134,10 @@ fn delete_at_key(root: &mut Value, keys: &[String]) -> bool {
 
     match parent {
         Value::Dictionary(dict) => {
-            dict.remove(last_key.as_str());
+            if dict.remove(last_key.as_str()).is_none() {
+                eprintln!("Invalid key path (no object at key path)");
+                return false;
+            }
             true
         }
         Value::Array(arr) => {
@@ -210,17 +213,28 @@ fn load_plist(path: &str) -> Result<(Value, PlistFormat)> {
     xcbuild_plist::deserialize(&data).with_context(|| format!("unable to parse {path}"))
 }
 
-/// Tokenize a command line, respecting quoted strings.
-fn tokenize(input: &str) -> Vec<String> {
+/// Tokenize a command line, respecting quoted strings, backslash escaping,
+/// and both single and double quotes.
+fn tokenize(input: &str) -> Result<Vec<String>, String> {
     let input = input.trim();
     let mut tokens = Vec::new();
     let mut current = String::new();
-    let mut in_quotes = false;
+    let mut chars = input.chars().peekable();
+    let mut in_double_quote = false;
+    let mut in_single_quote = false;
 
-    for ch in input.chars() {
-        if ch == '"' {
-            in_quotes = !in_quotes;
-        } else if ch.is_whitespace() && !in_quotes {
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && !in_single_quote {
+            // Backslash escaping: next character is literal
+            match chars.next() {
+                Some(escaped) => current.push(escaped),
+                None => return Err("Trailing backslash".to_string()),
+            }
+        } else if ch == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+        } else if ch == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+        } else if ch.is_whitespace() && !in_double_quote && !in_single_quote {
             if !current.is_empty() {
                 tokens.push(current.clone());
                 current.clear();
@@ -229,10 +243,18 @@ fn tokenize(input: &str) -> Vec<String> {
             current.push(ch);
         }
     }
+
+    if in_double_quote {
+        return Err("Unterminated double quote".to_string());
+    }
+    if in_single_quote {
+        return Err("Unterminated single quote".to_string());
+    }
+
     if !current.is_empty() {
         tokens.push(current);
     }
-    tokens
+    Ok(tokens)
 }
 
 fn process_command(
@@ -243,15 +265,22 @@ fn process_command(
     input: &str,
     mutated: &mut bool,
     keep_reading: &mut bool,
+    last_saved: &mut Value,
 ) -> bool {
-    let tokens = tokenize(input);
+    let tokens = match tokenize(input) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Tokenize error: {e}");
+            return false;
+        }
+    };
     if tokens.is_empty() {
         return true;
     }
 
     let command = &tokens[0];
-    match command.as_str() {
-        "Print" => {
+    match command.to_ascii_lowercase().as_str() {
+        "print" => {
             let keys = if tokens.len() > 1 {
                 parse_key_path(&tokens[1])
             } else {
@@ -259,39 +288,34 @@ fn process_command(
             };
             print_value(root, &keys, use_xml)
         }
-        "Save" => save_plist(root, save_format, path),
-        "Revert" => {
-            if path.is_empty() {
-                eprintln!("Error: no input specified");
-                return false;
+        "save" => {
+            let result = save_plist(root, save_format, path);
+            if result {
+                *last_saved = root.clone();
             }
-            match load_plist(path) {
-                Ok((new_root, _)) => {
-                    *root = new_root;
-                    *mutated = true;
-                    true
-                }
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    false
-                }
-            }
+            result
         }
-        "Exit" => {
+        "revert" => {
+            *root = last_saved.clone();
+            *mutated = true;
+            true
+        }
+        "exit" => {
             *keep_reading = false;
             true
         }
-        "Set" => {
-            if tokens.len() < 2 {
-                eprintln!("Set command requires KeyPath");
+        "set" => {
+            if tokens.len() < 3 {
+                eprintln!("Set requires <KeyPath> <Value>");
                 return false;
             }
             let keys = parse_key_path(&tokens[1]);
-            let value_str = if tokens.len() > 2 {
-                tokens[2..].join(" ")
-            } else {
-                String::new()
-            };
+            // Require that the key path already exists
+            if get_at_key_path(root, &keys).is_none() {
+                eprintln!("Invalid key path (no object at key path)");
+                return false;
+            }
+            let value_str = tokens[2..].join(" ");
             let value = Value::String(value_str);
             let result = set_value_at_key(root, &keys, value, true);
             if result {
@@ -299,7 +323,7 @@ fn process_command(
             }
             result
         }
-        "Add" => {
+        "add" => {
             if tokens.len() < 3 {
                 eprintln!("Add command requires KeyPath and Type");
                 return false;
@@ -330,7 +354,7 @@ fn process_command(
             }
             result
         }
-        "Clear" => {
+        "clear" => {
             let type_name = if tokens.len() > 1 {
                 tokens[1].as_str()
             } else {
@@ -352,7 +376,7 @@ fn process_command(
                 false
             }
         }
-        "Delete" => {
+        "delete" => {
             if tokens.len() < 2 {
                 eprintln!("Delete command requires KeyPath");
                 return false;
@@ -364,7 +388,7 @@ fn process_command(
             }
             result
         }
-        "Copy" => {
+        "copy" => {
             if tokens.len() < 3 {
                 eprintln!("Copy command requires SrcKeyPath and DstKeyPath");
                 return false;
@@ -387,7 +411,7 @@ fn process_command(
             }
             result
         }
-        "Merge" => {
+        "merge" => {
             if tokens.len() < 2 {
                 eprintln!("Merge command requires KeyPath");
                 return false;
@@ -462,7 +486,7 @@ fn process_command(
                 }
             }
         }
-        "Import" => {
+        "import" => {
             if tokens.len() < 3 {
                 eprintln!("Import command requires KeyPath and File");
                 return false;
@@ -483,7 +507,7 @@ fn process_command(
             }
             result
         }
-        "Help" => {
+        "help" => {
             command_help();
             true
         }
@@ -492,6 +516,21 @@ fn process_command(
             false
         }
     }
+}
+
+/// Check whether any component of the given path is a symlink.
+fn path_contains_symlink(path: &str) -> bool {
+    let p = Path::new(path);
+    let mut accumulated = std::path::PathBuf::new();
+    for component in p.components() {
+        accumulated.push(component);
+        if let Ok(metadata) = fs::symlink_metadata(&accumulated) {
+            if metadata.file_type().is_symlink() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn main() {
@@ -536,11 +575,9 @@ fn main() {
     let mut save_format = PlistFormat::Xml;
 
     if no_follow_symlinks && !input.is_empty() {
-        if let Ok(metadata) = fs::symlink_metadata(&input) {
-            if metadata.file_type().is_symlink() {
-                eprintln!("Error: file is a symlink and -l was specified");
-                std::process::exit(1);
-            }
+        if path_contains_symlink(&input) {
+            eprintln!("Error: path contains a symlink and -l was specified");
+            std::process::exit(1);
         }
     }
 
@@ -562,11 +599,11 @@ fn main() {
         root = Value::Dictionary(plist::Dictionary::new());
     }
 
+    let mut last_saved = root.clone();
     let mut success = true;
 
     if !commands.is_empty() {
-        // Batch mode: process each -c command, save once at the end
-        let mut any_mutated = false;
+        // Batch mode: process each -c command, save after each mutation
         for cmd in &commands {
             let mut mutated = false;
             let mut keep_reading = true;
@@ -578,13 +615,12 @@ fn main() {
                 cmd,
                 &mut mutated,
                 &mut keep_reading,
+                &mut last_saved,
             );
-            if mutated {
-                any_mutated = true;
+            if mutated && !input.is_empty() {
+                save_plist(&root, save_format, &input);
+                last_saved = root.clone();
             }
-        }
-        if any_mutated && !input.is_empty() {
-            save_plist(&root, save_format, &input);
         }
     } else {
         // Interactive mode
@@ -604,6 +640,7 @@ fn main() {
                         &line,
                         &mut mutated,
                         &mut keep_reading,
+                        &mut last_saved,
                     );
                 }
                 Err(_) => {
