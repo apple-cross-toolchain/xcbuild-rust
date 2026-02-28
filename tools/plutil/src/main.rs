@@ -43,6 +43,8 @@ fn help(error: Option<&str>) -> ! {
     eprintln!("  openstep1");
     eprintln!("  json");
     eprintln!("  raw");
+    eprintln!("  swift");
+    eprintln!("  objc");
 
     eprintln!("\nflags:");
     eprintln!("  -r  human readable (sorted JSON)");
@@ -87,6 +89,7 @@ fn value_type_name(value: &Value) -> &'static str {
         Value::Data(_) => "data",
         Value::Array(_) => "array",
         Value::Dictionary(_) => "dictionary",
+        Value::Uid(_) => "uid",
         _ => "unknown",
     }
 }
@@ -95,7 +98,8 @@ fn parse_value_arg(type_arg: &str, value_str: Option<&str>) -> Result<Value> {
     match type_arg {
         "-bool" => {
             let s = value_str.ok_or_else(|| anyhow::anyhow!("missing value for -bool"))?;
-            let b = s == "YES" || s == "true";
+            let b = xcbuild_plist::parse_bool(s)
+                .ok_or_else(|| anyhow::anyhow!("invalid boolean value '{s}'"))?;
             Ok(Value::Boolean(b))
         }
         "-integer" => {
@@ -114,11 +118,15 @@ fn parse_value_arg(type_arg: &str, value_str: Option<&str>) -> Result<Value> {
         }
         "-date" => {
             let s = value_str.ok_or_else(|| anyhow::anyhow!("missing value for -date"))?;
-            Ok(Value::String(s.to_string()))
+            let date = plist::Date::from_xml_format(s)
+                .map_err(|_| anyhow::anyhow!("invalid date value '{s}'"))?;
+            Ok(Value::Date(date))
         }
         "-data" => {
             let s = value_str.ok_or_else(|| anyhow::anyhow!("missing value for -data"))?;
-            Ok(Value::Data(s.as_bytes().to_vec()))
+            let decoded = xcbuild_plist::base64_decode(s)
+                .map_err(|e| anyhow::anyhow!("invalid base64 data: {e}"))?;
+            Ok(Value::Data(decoded))
         }
         "-xml" => {
             let s = value_str.ok_or_else(|| anyhow::anyhow!("missing value for -xml"))?;
@@ -145,9 +153,58 @@ fn is_no_value_type(type_arg: &str) -> bool {
     matches!(type_arg, "-array" | "-dictionary")
 }
 
-/// Parse plutil's dot-separated key path.
-fn parse_dot_key_path(path: &str) -> Vec<String> {
-    path.split('.').map(|s| s.to_string()).collect()
+/// Key path segment: either a dictionary key or an array index.
+#[derive(Debug, Clone)]
+enum PathPart {
+    Key(String),
+    Index(usize),
+}
+
+/// Parse plutil's dot-separated key path with backslash escape support.
+/// Escaped dots (\.) are treated as literal dots within a key.
+fn parse_dot_key_path(path: &str) -> Result<Vec<PathPart>> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+
+    for ch in path.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '.' {
+            if current.is_empty() {
+                bail!("invalid keypath '{path}'");
+            }
+            parts.push(classify_path_part(&current));
+            current.clear();
+            continue;
+        }
+        current.push(ch);
+    }
+
+    if escaped {
+        bail!("invalid escape in keypath '{path}'");
+    }
+
+    if !current.is_empty() {
+        parts.push(classify_path_part(&current));
+    }
+
+    Ok(parts)
+}
+
+fn classify_path_part(s: &str) -> PathPart {
+    if let Ok(idx) = s.parse::<usize>() {
+        PathPart::Index(idx)
+    } else {
+        PathPart::Key(s.to_string())
+    }
 }
 
 fn read_input(path: &str) -> Result<Vec<u8>> {
@@ -184,19 +241,38 @@ fn output_path(output: &Option<String>, extension: &Option<String>, file: &str) 
     file.to_string()
 }
 
-fn navigate_to_value<'a>(root: &'a Value, keys: &[String]) -> Result<&'a Value> {
+fn navigate_to_value<'a>(root: &'a Value, parts: &[PathPart]) -> Result<&'a Value> {
     let mut current = root;
-    for key in keys {
-        current = match current {
-            Value::Dictionary(dict) => dict
+    for part in parts {
+        current = match (part, current) {
+            (PathPart::Key(key), Value::Dictionary(dict)) => dict
                 .get(key.as_str())
                 .ok_or_else(|| anyhow::anyhow!("invalid key path"))?,
-            Value::Array(arr) => {
-                let idx: usize = key.parse().context("invalid key path")?;
-                arr.get(idx)
-                    .ok_or_else(|| anyhow::anyhow!("invalid key path"))?
-            }
+            (PathPart::Index(idx), Value::Array(arr)) => arr
+                .get(*idx)
+                .ok_or_else(|| anyhow::anyhow!("invalid key path"))?,
             _ => bail!("invalid key path"),
+        };
+    }
+    Ok(current)
+}
+
+fn navigate_to_value_mut<'a>(root: &'a mut Value, parts: &[PathPart]) -> Result<&'a mut Value> {
+    let mut current = root;
+    for part in parts {
+        current = match part {
+            PathPart::Key(key) => match current {
+                Value::Dictionary(dict) => dict
+                    .get_mut(key.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("invalid key path"))?,
+                _ => bail!("invalid key path"),
+            },
+            PathPart::Index(idx) => match current {
+                Value::Array(arr) => arr
+                    .get_mut(*idx)
+                    .ok_or_else(|| anyhow::anyhow!("invalid key path"))?,
+                _ => bail!("invalid key path"),
+            },
         };
     }
     Ok(current)
@@ -206,15 +282,50 @@ fn perform_adjustment(
     root: &mut Value,
     adjustment: &Adjustment,
 ) -> Result<Option<Value>> {
-    let keys = parse_dot_key_path(&adjustment.path);
-    if keys.is_empty() {
-        bail!("invalid key path");
+    let parts = parse_dot_key_path(&adjustment.path)?;
+    if parts.is_empty() {
+        // Empty path = root object
+        match adjustment.adj_type {
+            AdjustmentType::Type => {
+                let type_name = value_type_name(root);
+                if let Some(ref expect) = adjustment.expect_type {
+                    if type_name != expect.as_str() {
+                        bail!(
+                            "expected {expect} but found {type_name} at key path {}",
+                            adjustment.path
+                        );
+                    }
+                }
+                return Ok(Some(Value::String(type_name.to_string())));
+            }
+            AdjustmentType::Extract => {
+                if let Some(ref expect) = adjustment.expect_type {
+                    let type_name = value_type_name(root);
+                    if type_name != expect.as_str() {
+                        bail!(
+                            "expected {expect} but found {type_name} at key path {}",
+                            adjustment.path
+                        );
+                    }
+                }
+                return Ok(Some(root.clone()));
+            }
+            AdjustmentType::Replace => {
+                let value = adjustment.value.as_ref().expect("replace requires value");
+                *root = value.clone();
+                return Ok(None);
+            }
+            AdjustmentType::Remove => {
+                bail!("cannot remove root object");
+            }
+            _ => bail!("invalid key path"),
+        }
     }
 
     // For Type and Extract, handle expect_type validation
     match adjustment.adj_type {
         AdjustmentType::Type => {
-            let target = navigate_to_value(root, &keys)?;
+            let target = navigate_to_value(root, &parts)?;
             let type_name = value_type_name(target);
             if let Some(ref expect) = adjustment.expect_type {
                 if type_name != expect.as_str() {
@@ -224,34 +335,19 @@ fn perform_adjustment(
                     );
                 }
             }
-            // Return the type name as a string value (will be printed)
             return Ok(Some(Value::String(type_name.to_string())));
         }
         _ => {}
     }
 
-    let parent_keys = &keys[..keys.len() - 1];
-    let last_key = &keys[keys.len() - 1];
+    let parent_parts = &parts[..parts.len() - 1];
+    let last_part = &parts[parts.len() - 1];
 
     // Navigate to parent
-    let parent = if parent_keys.is_empty() {
+    let parent = if parent_parts.is_empty() {
         root
     } else {
-        let mut current: &mut Value = root;
-        for key in parent_keys {
-            current = match current {
-                Value::Dictionary(dict) => dict
-                    .get_mut(key.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("invalid key path"))?,
-                Value::Array(arr) => {
-                    let idx: usize = key.parse().context("invalid key path")?;
-                    arr.get_mut(idx)
-                        .ok_or_else(|| anyhow::anyhow!("invalid key path"))?
-                }
-                _ => bail!("invalid key path"),
-            };
-        }
-        current
+        navigate_to_value_mut(root, parent_parts)?
     };
 
     match adjustment.adj_type {
@@ -260,15 +356,13 @@ fn perform_adjustment(
 
             if adjustment.append {
                 // Append mode: navigate to the keypath itself, it must be an array
-                let target = match parent {
-                    Value::Dictionary(dict) => dict
-                        .get_mut(last_key.as_str())
+                let target = match (last_part, &mut *parent) {
+                    (PathPart::Key(key), Value::Dictionary(dict)) => dict
+                        .get_mut(key.as_str())
                         .ok_or_else(|| anyhow::anyhow!("invalid key path"))?,
-                    Value::Array(arr) => {
-                        let idx: usize = last_key.parse().context("invalid key path")?;
-                        arr.get_mut(idx)
-                            .ok_or_else(|| anyhow::anyhow!("invalid key path"))?
-                    }
+                    (PathPart::Index(idx), Value::Array(arr)) => arr
+                        .get_mut(*idx)
+                        .ok_or_else(|| anyhow::anyhow!("invalid key path"))?,
                     _ => bail!("invalid key path"),
                 };
                 match target {
@@ -278,16 +372,16 @@ fn perform_adjustment(
                     _ => bail!("target of -append must be an array"),
                 }
             } else {
-                match parent {
-                    Value::Dictionary(dict) => {
-                        if dict.get(last_key.as_str()).is_none() {
-                            dict.insert(last_key.clone(), value.clone());
+                match (last_part, parent) {
+                    (PathPart::Key(key), Value::Dictionary(dict)) => {
+                        if dict.contains_key(key.as_str()) {
+                            bail!("key '{}' already exists", key);
                         }
+                        dict.insert(key.clone(), value.clone());
                     }
-                    Value::Array(arr) => {
-                        let idx: usize = last_key.parse().unwrap_or(arr.len());
-                        if idx < arr.len() {
-                            arr.insert(idx, value.clone());
+                    (PathPart::Index(idx), Value::Array(arr)) => {
+                        if *idx < arr.len() {
+                            arr.insert(*idx, value.clone());
                         } else {
                             arr.push(value.clone());
                         }
@@ -299,43 +393,43 @@ fn perform_adjustment(
         }
         AdjustmentType::Replace => {
             let value = adjustment.value.as_ref().expect("replace requires value");
-            match parent {
-                Value::Dictionary(dict) => {
-                    dict.insert(last_key.clone(), value.clone());
-                }
-                Value::Array(arr) => {
-                    let idx: usize = last_key.parse().unwrap_or(arr.len());
-                    if idx < arr.len() {
-                        arr[idx] = value.clone();
-                    } else {
-                        arr.push(value.clone());
+            match (last_part, parent) {
+                (PathPart::Key(key), Value::Dictionary(dict)) => {
+                    if !dict.contains_key(key.as_str()) {
+                        bail!("key '{}' does not exist", key);
                     }
+                    dict.insert(key.clone(), value.clone());
+                }
+                (PathPart::Index(idx), Value::Array(arr)) => {
+                    if *idx >= arr.len() {
+                        bail!("array index {} out of bounds", idx);
+                    }
+                    arr[*idx] = value.clone();
                 }
                 _ => bail!("invalid key path"),
             }
             Ok(None)
         }
-        AdjustmentType::Remove => match parent {
-            Value::Dictionary(dict) => {
-                dict.remove(last_key.as_str());
+        AdjustmentType::Remove => match (last_part, parent) {
+            (PathPart::Key(key), Value::Dictionary(dict)) => {
+                if dict.remove(key.as_str()).is_none() {
+                    bail!("key '{}' does not exist", key);
+                }
                 Ok(None)
             }
-            Value::Array(arr) => {
-                let idx: usize = last_key.parse().context("invalid array index")?;
-                if idx < arr.len() {
-                    arr.remove(idx);
+            (PathPart::Index(idx), Value::Array(arr)) => {
+                if *idx >= arr.len() {
+                    bail!("array index {} out of bounds", idx);
                 }
+                arr.remove(*idx);
                 Ok(None)
             }
             _ => bail!("invalid key path"),
         },
         AdjustmentType::Extract => {
-            let extracted = match parent {
-                Value::Dictionary(dict) => dict.get(last_key.as_str()).cloned(),
-                Value::Array(arr) => {
-                    let idx: usize = last_key.parse().context("invalid array index")?;
-                    arr.get(idx).cloned()
-                }
+            let extracted = match (last_part, &*parent) {
+                (PathPart::Key(key), Value::Dictionary(dict)) => dict.get(key.as_str()).cloned(),
+                (PathPart::Index(idx), Value::Array(arr)) => arr.get(*idx).cloned(),
                 _ => None,
             };
             if let Some(ref value) = extracted {
@@ -383,7 +477,7 @@ fn main() {
         }
 
         match arg.as_str() {
-            "-help" => {
+            "-help" | "--help" | "-h" => {
                 command = Some(Command::Help);
             }
             "-lint" => {
@@ -611,11 +705,19 @@ fn main() {
     }
 
     let has_type_adj = adjustments.iter().any(|a| matches!(a.adj_type, AdjustmentType::Type));
+    let has_extract_raw = adjustments.iter().any(|a| {
+        matches!(a.adj_type, AdjustmentType::Extract) && convert_format == Some(PlistFormat::Raw)
+    });
     let modify = convert_format.is_some() || !adjustments.is_empty();
 
     // Handle help
     if matches!(command, Some(Command::Help)) {
         help(None);
+    }
+
+    // Validate -n flag: only valid with -extract <keypath> raw
+    if no_newline && !has_extract_raw {
+        help(Some("-n is only supported with -extract <keypath> raw"));
     }
 
     // Handle -create: create empty plist
