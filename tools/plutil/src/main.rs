@@ -18,10 +18,12 @@ fn help(error: Option<&str>) -> ! {
     eprintln!("  -help (this message)");
     eprintln!("  -p");
     eprintln!("  -convert <format>");
-    eprintln!("  -insert <key> <value>");
+    eprintln!("  -create <format>");
+    eprintln!("  -insert <key> <value> [-append]");
     eprintln!("  -replace <key> <value>");
     eprintln!("  -remove <key>");
-    eprintln!("  -extract <key> <format>");
+    eprintln!("  -extract <key> <format> [-expect <type>]");
+    eprintln!("  -type <key> [-expect <type>]");
 
     eprintln!("\nvalues:");
     eprintln!("  -bool <YES|NO>");
@@ -32,12 +34,19 @@ fn help(error: Option<&str>) -> ! {
     eprintln!("  -date <iso8601>");
     eprintln!("  -xml <plist>");
     eprintln!("  -json <json>");
+    eprintln!("  -array");
+    eprintln!("  -dictionary");
 
     eprintln!("\nformats:");
     eprintln!("  xml1");
     eprintln!("  binary1");
     eprintln!("  openstep1");
     eprintln!("  json");
+    eprintln!("  raw");
+
+    eprintln!("\nflags:");
+    eprintln!("  -r  human readable (sorted JSON)");
+    eprintln!("  -n  no trailing newline (raw format)");
 
     std::process::exit(if error.is_some() { 1 } else { 0 });
 }
@@ -47,6 +56,7 @@ enum Command {
     Lint,
     Print,
     Help,
+    Create,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -55,6 +65,7 @@ enum AdjustmentType {
     Replace,
     Remove,
     Extract,
+    Type,
 }
 
 #[derive(Debug)]
@@ -62,39 +73,76 @@ struct Adjustment {
     adj_type: AdjustmentType,
     path: String,
     value: Option<Value>,
+    expect_type: Option<String>,
+    append: bool,
 }
 
-fn parse_value_arg(type_arg: &str, value_str: &str) -> Result<Value> {
+fn value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Boolean(_) => "bool",
+        Value::Integer(_) => "integer",
+        Value::Real(_) => "float",
+        Value::String(_) => "string",
+        Value::Date(_) => "date",
+        Value::Data(_) => "data",
+        Value::Array(_) => "array",
+        Value::Dictionary(_) => "dictionary",
+        _ => "unknown",
+    }
+}
+
+fn parse_value_arg(type_arg: &str, value_str: Option<&str>) -> Result<Value> {
     match type_arg {
         "-bool" => {
-            let b = value_str == "YES" || value_str == "true";
+            let s = value_str.ok_or_else(|| anyhow::anyhow!("missing value for -bool"))?;
+            let b = s == "YES" || s == "true";
             Ok(Value::Boolean(b))
         }
         "-integer" => {
-            let i: i64 = value_str.parse().context("invalid integer argument")?;
+            let s = value_str.ok_or_else(|| anyhow::anyhow!("missing value for -integer"))?;
+            let i: i64 = s.parse().context("invalid integer argument")?;
             Ok(Value::Integer(i.into()))
         }
         "-float" => {
-            let f: f64 = value_str.parse().context("invalid float argument")?;
+            let s = value_str.ok_or_else(|| anyhow::anyhow!("missing value for -float"))?;
+            let f: f64 = s.parse().context("invalid float argument")?;
             Ok(Value::Real(f))
         }
-        "-string" => Ok(Value::String(value_str.to_string())),
-        "-date" => Ok(Value::String(value_str.to_string())),
-        "-data" => Ok(Value::Data(value_str.as_bytes().to_vec())),
+        "-string" => {
+            let s = value_str.ok_or_else(|| anyhow::anyhow!("missing value for -string"))?;
+            Ok(Value::String(s.to_string()))
+        }
+        "-date" => {
+            let s = value_str.ok_or_else(|| anyhow::anyhow!("missing value for -date"))?;
+            Ok(Value::String(s.to_string()))
+        }
+        "-data" => {
+            let s = value_str.ok_or_else(|| anyhow::anyhow!("missing value for -data"))?;
+            Ok(Value::Data(s.as_bytes().to_vec()))
+        }
         "-xml" => {
-            let data = value_str.as_bytes();
+            let s = value_str.ok_or_else(|| anyhow::anyhow!("missing value for -xml"))?;
+            let data = s.as_bytes();
             let value = xcbuild_plist::deserialize_with_format(data, PlistFormat::Xml)
                 .context("invalid XML value")?;
             Ok(value)
         }
         "-json" => {
-            let data = value_str.as_bytes();
+            let s = value_str.ok_or_else(|| anyhow::anyhow!("missing value for -json"))?;
+            let data = s.as_bytes();
             let value = xcbuild_plist::deserialize_with_format(data, PlistFormat::Json)
                 .context("invalid JSON value")?;
             Ok(value)
         }
+        "-array" => Ok(Value::Array(vec![])),
+        "-dictionary" => Ok(Value::Dictionary(plist::Dictionary::new())),
         _ => bail!("unknown type option {type_arg}"),
     }
+}
+
+/// Returns true if the type_arg is a no-value type (-array, -dictionary)
+fn is_no_value_type(type_arg: &str) -> bool {
+    matches!(type_arg, "-array" | "-dictionary")
 }
 
 /// Parse plutil's dot-separated key path.
@@ -136,6 +184,24 @@ fn output_path(output: &Option<String>, extension: &Option<String>, file: &str) 
     file.to_string()
 }
 
+fn navigate_to_value<'a>(root: &'a Value, keys: &[String]) -> Result<&'a Value> {
+    let mut current = root;
+    for key in keys {
+        current = match current {
+            Value::Dictionary(dict) => dict
+                .get(key.as_str())
+                .ok_or_else(|| anyhow::anyhow!("invalid key path"))?,
+            Value::Array(arr) => {
+                let idx: usize = key.parse().context("invalid key path")?;
+                arr.get(idx)
+                    .ok_or_else(|| anyhow::anyhow!("invalid key path"))?
+            }
+            _ => bail!("invalid key path"),
+        };
+    }
+    Ok(current)
+}
+
 fn perform_adjustment(
     root: &mut Value,
     adjustment: &Adjustment,
@@ -143,6 +209,25 @@ fn perform_adjustment(
     let keys = parse_dot_key_path(&adjustment.path);
     if keys.is_empty() {
         bail!("invalid key path");
+    }
+
+    // For Type and Extract, handle expect_type validation
+    match adjustment.adj_type {
+        AdjustmentType::Type => {
+            let target = navigate_to_value(root, &keys)?;
+            let type_name = value_type_name(target);
+            if let Some(ref expect) = adjustment.expect_type {
+                if type_name != expect.as_str() {
+                    bail!(
+                        "expected {expect} but found {type_name} at key path {}",
+                        adjustment.path
+                    );
+                }
+            }
+            // Return the type name as a string value (will be printed)
+            return Ok(Some(Value::String(type_name.to_string())));
+        }
+        _ => {}
     }
 
     let parent_keys = &keys[..keys.len() - 1];
@@ -172,21 +257,43 @@ fn perform_adjustment(
     match adjustment.adj_type {
         AdjustmentType::Insert => {
             let value = adjustment.value.as_ref().expect("insert requires value");
-            match parent {
-                Value::Dictionary(dict) => {
-                    if dict.get(last_key.as_str()).is_none() {
-                        dict.insert(last_key.clone(), value.clone());
+
+            if adjustment.append {
+                // Append mode: navigate to the keypath itself, it must be an array
+                let target = match parent {
+                    Value::Dictionary(dict) => dict
+                        .get_mut(last_key.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("invalid key path"))?,
+                    Value::Array(arr) => {
+                        let idx: usize = last_key.parse().context("invalid key path")?;
+                        arr.get_mut(idx)
+                            .ok_or_else(|| anyhow::anyhow!("invalid key path"))?
                     }
-                }
-                Value::Array(arr) => {
-                    let idx: usize = last_key.parse().unwrap_or(arr.len());
-                    if idx < arr.len() {
-                        arr.insert(idx, value.clone());
-                    } else {
+                    _ => bail!("invalid key path"),
+                };
+                match target {
+                    Value::Array(arr) => {
                         arr.push(value.clone());
                     }
+                    _ => bail!("target of -append must be an array"),
                 }
-                _ => bail!("invalid key path"),
+            } else {
+                match parent {
+                    Value::Dictionary(dict) => {
+                        if dict.get(last_key.as_str()).is_none() {
+                            dict.insert(last_key.clone(), value.clone());
+                        }
+                    }
+                    Value::Array(arr) => {
+                        let idx: usize = last_key.parse().unwrap_or(arr.len());
+                        if idx < arr.len() {
+                            arr.insert(idx, value.clone());
+                        } else {
+                            arr.push(value.clone());
+                        }
+                    }
+                    _ => bail!("invalid key path"),
+                }
             }
             Ok(None)
         }
@@ -231,7 +338,21 @@ fn perform_adjustment(
                 }
                 _ => None,
             };
+            if let Some(ref value) = extracted {
+                if let Some(ref expect) = adjustment.expect_type {
+                    let type_name = value_type_name(value);
+                    if type_name != expect.as_str() {
+                        bail!(
+                            "expected {expect} but found {type_name} at key path {}",
+                            adjustment.path
+                        );
+                    }
+                }
+            }
             Ok(extracted)
+        }
+        AdjustmentType::Type => {
+            unreachable!("Type handled above");
         }
     }
 }
@@ -242,11 +363,14 @@ fn main() {
     let mut command: Option<Command> = None;
     let mut adjustments: Vec<Adjustment> = Vec::new();
     let mut convert_format: Option<PlistFormat> = None;
+    let mut create_format: Option<PlistFormat> = None;
     let mut inputs: Vec<String> = Vec::new();
     let mut output: Option<String> = None;
     let mut extension: Option<String> = None;
     let mut silent = false;
     let mut separator = false;
+    let mut human_readable = false;
+    let mut no_newline = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -268,6 +392,18 @@ fn main() {
             "-p" => {
                 command = Some(Command::Print);
             }
+            "-create" => {
+                command = Some(Command::Create);
+                i += 1;
+                if i >= args.len() {
+                    help(Some("missing value for -create"));
+                }
+                let fmt = PlistFormat::parse(&args[i]);
+                if fmt.is_none() {
+                    help(Some(&format!("unknown format {}", args[i])));
+                }
+                create_format = fmt;
+            }
             "-convert" => {
                 i += 1;
                 if i >= args.len() {
@@ -281,47 +417,96 @@ fn main() {
             }
             "-insert" => {
                 i += 1;
-                if i + 2 >= args.len() {
+                if i >= args.len() {
                     help(Some("missing arguments for -insert"));
                 }
                 let path = args[i].clone();
                 i += 1;
-                let type_arg = &args[i];
-                i += 1;
-                let value_str = &args[i];
-                match parse_value_arg(type_arg, value_str) {
-                    Ok(value) => adjustments.push(Adjustment {
-                        adj_type: AdjustmentType::Insert,
-                        path,
-                        value: Some(value),
-                    }),
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        std::process::exit(1);
-                    }
+                if i >= args.len() {
+                    help(Some("missing arguments for -insert"));
                 }
+                let type_arg = &args[i];
+
+                let value = if is_no_value_type(type_arg) {
+                    match parse_value_arg(type_arg, None) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    i += 1;
+                    if i >= args.len() {
+                        help(Some("missing arguments for -insert"));
+                    }
+                    let value_str = &args[i];
+                    match parse_value_arg(type_arg, Some(value_str)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                };
+
+                // Check for -append flag
+                let mut append = false;
+                if i + 1 < args.len() && args[i + 1] == "-append" {
+                    append = true;
+                    i += 1;
+                }
+
+                adjustments.push(Adjustment {
+                    adj_type: AdjustmentType::Insert,
+                    path,
+                    value: Some(value),
+                    expect_type: None,
+                    append,
+                });
             }
             "-replace" => {
                 i += 1;
-                if i + 2 >= args.len() {
+                if i >= args.len() {
                     help(Some("missing arguments for -replace"));
                 }
                 let path = args[i].clone();
                 i += 1;
-                let type_arg = &args[i];
-                i += 1;
-                let value_str = &args[i];
-                match parse_value_arg(type_arg, value_str) {
-                    Ok(value) => adjustments.push(Adjustment {
-                        adj_type: AdjustmentType::Replace,
-                        path,
-                        value: Some(value),
-                    }),
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        std::process::exit(1);
-                    }
+                if i >= args.len() {
+                    help(Some("missing arguments for -replace"));
                 }
+                let type_arg = &args[i];
+
+                let value = if is_no_value_type(type_arg) {
+                    match parse_value_arg(type_arg, None) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    i += 1;
+                    if i >= args.len() {
+                        help(Some("missing arguments for -replace"));
+                    }
+                    let value_str = &args[i];
+                    match parse_value_arg(type_arg, Some(value_str)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                };
+
+                adjustments.push(Adjustment {
+                    adj_type: AdjustmentType::Replace,
+                    path,
+                    value: Some(value),
+                    expect_type: None,
+                    append: false,
+                });
             }
             "-remove" => {
                 i += 1;
@@ -332,6 +517,8 @@ fn main() {
                     adj_type: AdjustmentType::Remove,
                     path: args[i].clone(),
                     value: None,
+                    expect_type: None,
+                    append: false,
                 });
             }
             "-extract" => {
@@ -346,10 +533,44 @@ fn main() {
                     help(Some(&format!("unknown format {}", args[i])));
                 }
                 convert_format = fmt;
+
+                // Check for -expect
+                let mut expect_type = None;
+                if i + 2 < args.len() && args[i + 1] == "-expect" {
+                    i += 1; // skip -expect
+                    i += 1; // consume type
+                    expect_type = Some(args[i].clone());
+                }
+
                 adjustments.push(Adjustment {
                     adj_type: AdjustmentType::Extract,
                     path,
                     value: None,
+                    expect_type,
+                    append: false,
+                });
+            }
+            "-type" => {
+                i += 1;
+                if i >= args.len() {
+                    help(Some("missing argument for -type"));
+                }
+                let path = args[i].clone();
+
+                // Check for -expect
+                let mut expect_type = None;
+                if i + 2 < args.len() && args[i + 1] == "-expect" {
+                    i += 1; // skip -expect
+                    i += 1; // consume type
+                    expect_type = Some(args[i].clone());
+                }
+
+                adjustments.push(Adjustment {
+                    adj_type: AdjustmentType::Type,
+                    path,
+                    value: None,
+                    expect_type,
+                    append: false,
                 });
             }
             "-o" => {
@@ -370,7 +591,10 @@ fn main() {
                 silent = true;
             }
             "-r" => {
-                // human readable - currently a no-op
+                human_readable = true;
+            }
+            "-n" => {
+                no_newline = true;
             }
             "--" => {
                 separator = true;
@@ -386,11 +610,39 @@ fn main() {
         i += 1;
     }
 
+    let has_type_adj = adjustments.iter().any(|a| matches!(a.adj_type, AdjustmentType::Type));
     let modify = convert_format.is_some() || !adjustments.is_empty();
 
     // Handle help
     if matches!(command, Some(Command::Help)) {
         help(None);
+    }
+
+    // Handle -create: create empty plist
+    if matches!(command, Some(Command::Create)) {
+        let fmt = create_format.unwrap_or(PlistFormat::Xml);
+        let root = Value::Dictionary(plist::Dictionary::new());
+
+        if inputs.is_empty() {
+            help(Some("no output files for -create"));
+        }
+
+        for file in &inputs {
+            match xcbuild_plist::serialize(&root, fmt) {
+                Ok(bytes) => {
+                    let out_path = output_path(&output, &extension, file);
+                    if let Err(e) = write_output(&out_path, &bytes) {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        std::process::exit(0);
     }
 
     // Check conflicts
@@ -426,11 +678,19 @@ fn main() {
         if modify {
             let mut root = root;
             let mut write_value: Option<Value> = None;
+            let mut type_output: Option<String> = None;
 
             for adj in &adjustments {
                 match perform_adjustment(&mut root, adj) {
                     Ok(Some(extracted)) => {
-                        write_value = Some(extracted);
+                        if matches!(adj.adj_type, AdjustmentType::Type) {
+                            // For -type, the extracted value is a string with the type name
+                            if let Value::String(ref s) = extracted {
+                                type_output = Some(s.clone());
+                            }
+                        } else {
+                            write_value = Some(extracted);
+                        }
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -440,20 +700,45 @@ fn main() {
                 }
             }
 
-            let out_value = write_value.as_ref().unwrap_or(&root);
-            let out_format = convert_format.unwrap_or(format);
+            // Output type result
+            if let Some(ref type_name) = type_output {
+                println!("{type_name}");
+            }
 
-            match xcbuild_plist::serialize(out_value, out_format) {
-                Ok(bytes) => {
-                    let out_path = output_path(&output, &extension, file);
-                    if let Err(e) = write_output(&out_path, &bytes) {
-                        eprintln!("error: {e}");
-                        success = false;
+            // Only write file output if there's something to write
+            // -type alone doesn't produce file output
+            if !has_type_adj || write_value.is_some() || convert_format.is_some() {
+                if has_type_adj && write_value.is_none() && convert_format.is_none() {
+                    // -type only, no file output needed
+                } else {
+                    let out_value = write_value.as_ref().unwrap_or(&root);
+                    let out_format = convert_format.unwrap_or(format);
+
+                    let serialized = if human_readable && out_format == PlistFormat::Json {
+                        xcbuild_plist::serialize_json_sorted(out_value)
+                    } else {
+                        xcbuild_plist::serialize(out_value, out_format)
+                    };
+
+                    match serialized {
+                        Ok(mut bytes) => {
+                            if no_newline && out_format == PlistFormat::Raw {
+                                // Remove trailing newline if -n flag is set
+                                if bytes.last() == Some(&b'\n') {
+                                    bytes.pop();
+                                }
+                            }
+                            let out_path = output_path(&output, &extension, file);
+                            if let Err(e) = write_output(&out_path, &bytes) {
+                                eprintln!("error: {e}");
+                                success = false;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            success = false;
+                        }
                     }
-                }
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    success = false;
                 }
             }
         } else if matches!(command, Some(Command::Print)) {

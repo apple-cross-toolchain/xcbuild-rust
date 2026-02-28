@@ -15,6 +15,7 @@ fn help(error: Option<&str>) -> ! {
     eprintln!("Options:");
     eprintln!("  -c \"<command>\" command to execute, otherwise run in interactive mode");
     eprintln!("  -x output will be in xml plist format");
+    eprintln!("  -l do not follow symlinks");
     eprintln!("  -h print help including commands");
 
     std::process::exit(if error.is_some() { 1 } else { 0 });
@@ -498,6 +499,7 @@ fn main() {
 
     let mut show_help = false;
     let mut use_xml = false;
+    let mut no_follow_symlinks = false;
     let mut commands: Vec<String> = Vec::new();
     let mut input = String::new();
 
@@ -507,6 +509,7 @@ fn main() {
         match arg.as_str() {
             "-h" => show_help = true,
             "-x" => use_xml = true,
+            "-l" => no_follow_symlinks = true,
             "-c" => {
                 i += 1;
                 if i >= args.len() {
@@ -532,6 +535,15 @@ fn main() {
     let mut root: Value;
     let mut save_format = PlistFormat::Xml;
 
+    if no_follow_symlinks && !input.is_empty() {
+        if let Ok(metadata) = fs::symlink_metadata(&input) {
+            if metadata.file_type().is_symlink() {
+                eprintln!("Error: file is a symlink and -l was specified");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if !input.is_empty() && Path::new(&input).exists() {
         match load_plist(&input) {
             Ok((v, f)) => {
@@ -553,7 +565,8 @@ fn main() {
     let mut success = true;
 
     if !commands.is_empty() {
-        // Batch mode: process each -c command
+        // Batch mode: process each -c command, save once at the end
+        let mut any_mutated = false;
         for cmd in &commands {
             let mut mutated = false;
             let mut keep_reading = true;
@@ -567,9 +580,11 @@ fn main() {
                 &mut keep_reading,
             );
             if mutated {
-                // Auto-save after mutation in batch mode
-                save_plist(&root, save_format, &input);
+                any_mutated = true;
             }
+        }
+        if any_mutated && !input.is_empty() {
+            save_plist(&root, save_format, &input);
         }
     } else {
         // Interactive mode

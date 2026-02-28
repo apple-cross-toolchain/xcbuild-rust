@@ -20,6 +20,7 @@ members = [
     "tools/plutil",
     "tools/plist-buddy",
     "tools/lsbom",
+    "tools/mkbom",
     "tools/actool",
     "tools/dump-hmap",
     "tools/dump-bom",

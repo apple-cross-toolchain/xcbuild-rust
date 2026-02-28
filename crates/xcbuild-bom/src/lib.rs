@@ -418,6 +418,216 @@ pub mod paths {
     }
 }
 
+/// A BOM writer for creating new BOM archives.
+pub struct BomWriter {
+    /// Stored data blocks (index 0 is unused/null).
+    blocks: Vec<Vec<u8>>,
+    /// Named variables mapping to block indices.
+    variables: Vec<(String, u32)>,
+}
+
+impl BomWriter {
+    pub fn new() -> Self {
+        // Block 0 is reserved (null block)
+        BomWriter {
+            blocks: vec![vec![]],
+            variables: Vec::new(),
+        }
+    }
+
+    /// Add a data block and return its index.
+    pub fn add_block(&mut self, data: Vec<u8>) -> u32 {
+        let idx = self.blocks.len() as u32;
+        self.blocks.push(data);
+        idx
+    }
+
+    /// Add a named variable pointing to a block index.
+    pub fn add_variable(&mut self, name: &str, index: u32) {
+        self.variables.push((name.to_string(), index));
+    }
+
+    /// Build a BOM tree from key-value pairs and return the block index of the tree root.
+    pub fn build_tree(&mut self, entries: &[(Vec<u8>, Vec<u8>)]) -> u32 {
+        // Store each key and value as separate blocks
+        // Build leaf nodes containing entry indices
+
+        const ENTRIES_PER_LEAF: usize = 256;
+
+        let mut leaf_indices: Vec<u32> = Vec::new();
+
+        for chunk in entries.chunks(ENTRIES_PER_LEAF) {
+            let count = chunk.len() as u16;
+            let is_leaf: u16 = 1;
+            let forward: u32 = 0; // will be patched below
+
+            let mut leaf_data = Vec::new();
+            leaf_data.extend_from_slice(&is_leaf.to_be_bytes());
+            leaf_data.extend_from_slice(&count.to_be_bytes());
+            leaf_data.extend_from_slice(&forward.to_be_bytes());
+            // 4 bytes padding (backward pointer)
+            leaf_data.extend_from_slice(&0u32.to_be_bytes());
+
+            for (key, value) in chunk {
+                let value_idx = self.add_block(value.clone());
+                let key_idx = self.add_block(key.clone());
+                leaf_data.extend_from_slice(&value_idx.to_be_bytes());
+                leaf_data.extend_from_slice(&key_idx.to_be_bytes());
+            }
+
+            let leaf_idx = self.add_block(leaf_data);
+            leaf_indices.push(leaf_idx);
+        }
+
+        // Patch forward pointers in leaf nodes
+        for i in 0..leaf_indices.len() - 1 {
+            let next_idx = leaf_indices[i + 1];
+            let leaf = &mut self.blocks[leaf_indices[i] as usize];
+            // Forward pointer is at offset 4..8
+            leaf[4..8].copy_from_slice(&next_idx.to_be_bytes());
+        }
+
+        let child_index = if leaf_indices.is_empty() {
+            // Empty tree: create an empty leaf
+            let mut leaf_data = Vec::new();
+            leaf_data.extend_from_slice(&1u16.to_be_bytes()); // is_leaf
+            leaf_data.extend_from_slice(&0u16.to_be_bytes()); // count
+            leaf_data.extend_from_slice(&0u32.to_be_bytes()); // forward
+            leaf_data.extend_from_slice(&0u32.to_be_bytes()); // backward
+            self.add_block(leaf_data)
+        } else {
+            leaf_indices[0]
+        };
+
+        let entry_count = entries.len() as u32;
+
+        // Build tree header
+        let mut tree_data = Vec::new();
+        tree_data.extend_from_slice(TREE_MAGIC);
+        tree_data.extend_from_slice(&1u32.to_be_bytes()); // version
+        tree_data.extend_from_slice(&child_index.to_be_bytes());
+        // block size (unused, set to 4096)
+        tree_data.extend_from_slice(&4096u32.to_be_bytes());
+        // path count
+        tree_data.extend_from_slice(&entry_count.to_be_bytes());
+        // unknown byte
+        tree_data.push(0);
+
+        self.add_block(tree_data)
+    }
+
+    /// Serialize the BOM to bytes.
+    pub fn serialize(&self) -> Vec<u8> {
+        // Calculate layout
+        // Header: 32 bytes
+        // Then data blocks
+        // Then index table
+        // Then variables table
+
+        let num_blocks = self.blocks.len() as u32;
+
+        // Calculate data block positions (starting after header)
+        let mut block_offsets: Vec<(u32, u32)> = Vec::new(); // (offset, length)
+        let mut data_offset: u32 = HEADER_SIZE as u32;
+
+        for block in &self.blocks {
+            block_offsets.push((data_offset, block.len() as u32));
+            data_offset += block.len() as u32;
+        }
+
+        // Index table
+        let index_offset = data_offset;
+        // Index table: 4 bytes count + num_blocks * 8 bytes
+        let index_size = 4 + num_blocks * INDEX_ENTRY_SIZE as u32;
+
+        // Variables table
+        let vars_offset = index_offset + index_size;
+        let mut vars_data = Vec::new();
+        vars_data.extend_from_slice(&(self.variables.len() as u32).to_be_bytes());
+        for (name, index) in &self.variables {
+            vars_data.extend_from_slice(&index.to_be_bytes());
+            vars_data.push(name.len() as u8);
+            vars_data.extend_from_slice(name.as_bytes());
+        }
+
+        let total_size = vars_offset + vars_data.len() as u32;
+
+        // Build the output
+        let mut output = Vec::with_capacity(total_size as usize);
+
+        // Header (32 bytes)
+        output.extend_from_slice(BOM_MAGIC); // magic
+        output.extend_from_slice(&1u32.to_be_bytes()); // version
+        output.extend_from_slice(&num_blocks.to_be_bytes()); // block count
+        output.extend_from_slice(&index_offset.to_be_bytes()); // index offset
+        output.extend_from_slice(&index_size.to_be_bytes()); // index length
+        output.extend_from_slice(&vars_offset.to_be_bytes()); // variables offset
+        output.extend_from_slice(&(vars_data.len() as u32).to_be_bytes()); // variables length
+
+        // Data blocks
+        for block in &self.blocks {
+            output.extend_from_slice(block);
+        }
+
+        // Index table
+        output.extend_from_slice(&num_blocks.to_be_bytes());
+        for (offset, length) in &block_offsets {
+            output.extend_from_slice(&offset.to_be_bytes());
+            output.extend_from_slice(&length.to_be_bytes());
+        }
+
+        // Variables table
+        output.extend_from_slice(&vars_data);
+
+        output
+    }
+}
+
+impl Default for BomWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl paths::PathInfo1 {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut data = Vec::with_capacity(8);
+        data.extend_from_slice(&self.id.to_be_bytes());
+        data.extend_from_slice(&self.index.to_be_bytes());
+        data
+    }
+}
+
+impl paths::PathInfo2 {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut data = Vec::with_capacity(31);
+        data.push(self.path_type);
+        data.push(0); // padding
+        data.extend_from_slice(&self.architecture.to_be_bytes());
+        data.extend_from_slice(&self.mode.to_be_bytes());
+        data.extend_from_slice(&self.user.to_be_bytes());
+        data.extend_from_slice(&self.group.to_be_bytes());
+        data.extend_from_slice(&self.modtime.to_be_bytes());
+        data.extend_from_slice(&self.size.to_be_bytes());
+        data.push(1); // device type (regular)
+        data.extend_from_slice(&self.checksum.to_be_bytes());
+        let link_bytes = self.link_name.as_bytes();
+        data.extend_from_slice(&(link_bytes.len() as u32).to_be_bytes());
+        data.extend_from_slice(link_bytes);
+        data
+    }
+}
+
+impl paths::FileKey {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut data = Vec::with_capacity(5 + self.name.len());
+        data.extend_from_slice(&self.parent.to_be_bytes());
+        data.extend_from_slice(self.name.as_bytes());
+        data.push(0); // null terminator
+        data
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +642,44 @@ mod tests {
     fn test_too_small() {
         let data = vec![0u8; 4];
         assert!(Bom::load(data).is_err());
+    }
+
+    #[test]
+    fn test_bom_writer_roundtrip() {
+        let mut writer = BomWriter::new();
+
+        // Create a simple tree with one entry
+        let key = paths::FileKey {
+            parent: 0,
+            name: "test.txt".to_string(),
+        };
+        let info1 = paths::PathInfo1 { id: 1, index: 0 };
+        let info2 = paths::PathInfo2 {
+            path_type: 1,
+            architecture: 0,
+            mode: 0o100644,
+            user: 501,
+            group: 20,
+            modtime: 0,
+            size: 100,
+            checksum: 0,
+            link_name: String::new(),
+        };
+
+        let info2_idx = writer.add_block(info2.to_bytes());
+        let info1_with_index = paths::PathInfo1 {
+            id: info1.id,
+            index: info2_idx,
+        };
+
+        let entries = vec![(key.to_bytes(), info1_with_index.to_bytes())];
+        let tree_idx = writer.build_tree(&entries);
+        writer.add_variable("Paths", tree_idx);
+
+        let data = writer.serialize();
+        let bom = Bom::load(data).expect("should load written BOM");
+
+        let read_entries = bom.tree_entries("Paths").expect("should read Paths tree");
+        assert_eq!(read_entries.len(), 1);
     }
 }

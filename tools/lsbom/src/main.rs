@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use xcbuild_bom::paths::{FileKey, PathInfo1, PathInfo2, PathType};
 use xcbuild_bom::Bom;
@@ -177,6 +178,112 @@ fn parse_options(args: &[String]) -> Options {
     opts
 }
 
+fn format_permissions_text(mode: u16, path_type: PathType) -> String {
+    let mut s = String::with_capacity(10);
+    s.push(match path_type {
+        PathType::Directory => 'd',
+        PathType::Link => 'l',
+        PathType::Device => 'b',
+        PathType::File => '-',
+    });
+    s.push(if mode & 0o400 != 0 { 'r' } else { '-' });
+    s.push(if mode & 0o200 != 0 { 'w' } else { '-' });
+    s.push(if mode & 0o100 != 0 { 'x' } else { '-' });
+    s.push(if mode & 0o040 != 0 { 'r' } else { '-' });
+    s.push(if mode & 0o020 != 0 { 'w' } else { '-' });
+    s.push(if mode & 0o010 != 0 { 'x' } else { '-' });
+    s.push(if mode & 0o004 != 0 { 'r' } else { '-' });
+    s.push(if mode & 0o002 != 0 { 'w' } else { '-' });
+    s.push(if mode & 0o001 != 0 { 'x' } else { '-' });
+    s
+}
+
+fn format_size_human(size: u32) -> String {
+    if size < 1024 {
+        format!("{size}")
+    } else if size < 1024 * 1024 {
+        format!("{:.1}K", size as f64 / 1024.0)
+    } else if size < 1024 * 1024 * 1024 {
+        format!("{:.1}M", size as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1}G", size as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn print_entry(path: &str, path_info_2: &PathInfo2, format: &[PrintItem]) {
+    let mut output = String::new();
+    for (i, item) in format.iter().enumerate() {
+        if i > 0 {
+            output.push('\t');
+        }
+        match item {
+            PrintItem::FileName => output.push_str(path),
+            PrintItem::FileNameQuoted => {
+                output.push('"');
+                output.push_str(path);
+                output.push('"');
+            }
+            PrintItem::Checksum => {
+                let _ = write!(output, "{}", path_info_2.checksum);
+            }
+            PrintItem::GroupID => {
+                let _ = write!(output, "{}", path_info_2.group);
+            }
+            PrintItem::GroupName => {
+                let _ = write!(output, "{}", path_info_2.group);
+            }
+            PrintItem::Permissions => {
+                let _ = write!(output, "{:o}", path_info_2.mode);
+            }
+            PrintItem::PermissionsText => {
+                output.push_str(&format_permissions_text(
+                    path_info_2.mode,
+                    path_info_2.path_type(),
+                ));
+            }
+            PrintItem::FileSize => {
+                let _ = write!(output, "{}", path_info_2.size);
+            }
+            PrintItem::FileSizeFormatted => {
+                output.push_str(&format_size_human(path_info_2.size));
+            }
+            PrintItem::ModificationTime => {
+                let _ = write!(output, "{}", path_info_2.modtime);
+            }
+            PrintItem::ModificationTimeFormatted => {
+                let _ = write!(output, "{}", path_info_2.modtime);
+            }
+            PrintItem::UserID => {
+                let _ = write!(output, "{}", path_info_2.user);
+            }
+            PrintItem::UserName => {
+                let _ = write!(output, "{}", path_info_2.user);
+            }
+            PrintItem::UserGroupID => {
+                let _ = write!(output, "{}/{}", path_info_2.user, path_info_2.group);
+            }
+            PrintItem::UserGroupName => {
+                let _ = write!(output, "{}/{}", path_info_2.user, path_info_2.group);
+            }
+        }
+    }
+    println!("{output}");
+}
+
+fn arch_to_cpu_type(arch: &str) -> Option<u16> {
+    // BOM stores architecture as a u16, using compact Mach-O CPU type values.
+    // The full Mach-O constants are 32-bit but BOM truncates to u16.
+    match arch {
+        "i386" => Some(0x07),
+        "x86_64" => Some(0x07), // 0x01000007 truncated
+        "arm" | "armv7" | "armv7s" | "armv7k" => Some(0x0C),
+        "arm64" | "arm64e" => Some(0x0C), // 0x0100000C truncated
+        "ppc" => Some(0x12),
+        "ppc64" => Some(0x12), // 0x01000012 truncated
+        _ => None,
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     let options = parse_options(&args);
@@ -189,10 +296,6 @@ fn main() -> Result<()> {
         Some(i) => i.clone(),
         None => help(Some("input is required")),
     };
-
-    if options.arch.is_some() {
-        eprintln!("warning: arch argument not yet implemented");
-    }
 
     let include_all = !options.include_block_devices
         && !options.include_character_devices
@@ -266,21 +369,42 @@ fn main() -> Result<()> {
             }
         }
 
+        // Filter by architecture
+        if let Some(ref arch_name) = options.arch {
+            if path_info_2.path_type() == PathType::File {
+                if let Some(cpu_type) = arch_to_cpu_type(arch_name) {
+                    if path_info_2.architecture != 0 && path_info_2.architecture != cpu_type {
+                        continue;
+                    }
+                }
+            }
+        }
+
         // Build full path
         let path = xcbuild_bom::paths::resolve_path(&file_key, &files);
 
-        if options.only_path {
+        if let Some(ref format) = options.print_format {
+            print_entry(&path, &path_info_2, format);
+        } else if options.only_path {
             println!("{path}");
         } else {
-            let mode = format!("{:o}", path_info_2.mode);
-            let uid = path_info_2.user.to_string();
-            let gid = path_info_2.group.to_string();
-            print!("{path}\t{mode}\t{uid}/{gid}");
+            print!("{path}");
+
+            if !options.no_modes {
+                let mode = format!("{:o}", path_info_2.mode);
+                let uid = path_info_2.user.to_string();
+                let gid = path_info_2.group.to_string();
+                print!("\t{mode}\t{uid}/{gid}");
+            }
 
             if path_info_2.path_type() == PathType::File {
                 let size = path_info_2.size.to_string();
                 let checksum = path_info_2.checksum.to_string();
                 print!("\t{size}\t{checksum}");
+            }
+
+            if options.print_mtime {
+                print!("\t{}", path_info_2.modtime);
             }
 
             println!();

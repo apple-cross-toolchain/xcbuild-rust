@@ -1,0 +1,9 @@
+[package]
+name = "mkbom"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+xcbuild-bom = { path = "../../crates/xcbuild-bom" }
+anyhow.workspace = true
+walkdir.workspace = true

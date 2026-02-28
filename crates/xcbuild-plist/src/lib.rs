@@ -29,6 +29,7 @@ pub enum PlistFormat {
     Binary,
     Ascii,
     Json,
+    Raw,
 }
 
 impl PlistFormat {
@@ -38,6 +39,7 @@ impl PlistFormat {
             PlistFormat::Binary => "binary1",
             PlistFormat::Ascii => "openstep1",
             PlistFormat::Json => "json",
+            PlistFormat::Raw => "raw",
         }
     }
 
@@ -47,6 +49,7 @@ impl PlistFormat {
             "binary1" => Some(PlistFormat::Binary),
             "openstep1" | "ascii1" => Some(PlistFormat::Ascii),
             "json" => Some(PlistFormat::Json),
+            "raw" => Some(PlistFormat::Raw),
             _ => None,
         }
     }
@@ -146,6 +149,7 @@ pub fn deserialize_with_format(data: &[u8], format: PlistFormat) -> Result<Value
             let json_value: serde_json::Value = serde_json::from_slice(data)?;
             Ok(json_to_plist(json_value))
         }
+        PlistFormat::Raw => Err(PlistError::UnknownFormat),
     }
 }
 
@@ -168,6 +172,94 @@ pub fn serialize(value: &Value, format: PlistFormat) -> Result<Vec<u8>, PlistErr
             let buf = serde_json::to_vec_pretty(&json_value)?;
             Ok(buf)
         }
+        PlistFormat::Raw => Ok(serialize_raw(value)),
+    }
+}
+
+/// Serialize a plist value to JSON with sorted dictionary keys (for -r flag).
+pub fn serialize_json_sorted(value: &Value) -> Result<Vec<u8>, PlistError> {
+    let json_value = plist_to_json_sorted(value);
+    let buf = serde_json::to_vec_pretty(&json_value)?;
+    Ok(buf)
+}
+
+fn serialize_raw(value: &Value) -> Vec<u8> {
+    let s = match value {
+        Value::Boolean(b) => {
+            if *b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        Value::Integer(i) => {
+            if let Some(n) = i.as_signed() {
+                n.to_string()
+            } else if let Some(n) = i.as_unsigned() {
+                n.to_string()
+            } else {
+                "0".to_string()
+            }
+        }
+        Value::Real(f) => f.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Date(d) => d.to_xml_format(),
+        Value::Data(d) => base64_encode(d),
+        Value::Array(arr) => arr.len().to_string(),
+        Value::Dictionary(dict) => {
+            let mut keys: Vec<&str> = dict.keys().map(|k| k.as_str()).collect();
+            keys.sort();
+            let mut result = String::new();
+            for (i, key) in keys.iter().enumerate() {
+                if i > 0 {
+                    result.push('\n');
+                }
+                result.push_str(key);
+            }
+            result
+        }
+        _ => String::new(),
+    };
+    let mut bytes = s.into_bytes();
+    bytes.push(b'\n');
+    bytes
+}
+
+fn plist_to_json_sorted(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Boolean(b) => serde_json::Value::Bool(*b),
+        Value::Integer(i) => {
+            if let Some(n) = i.as_signed() {
+                serde_json::Value::Number(serde_json::Number::from(n))
+            } else if let Some(n) = i.as_unsigned() {
+                serde_json::Value::Number(serde_json::Number::from(n))
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        Value::Real(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Data(d) => serde_json::Value::String(base64_encode(d)),
+        Value::Date(d) => serde_json::Value::String(d.to_xml_format()),
+        Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(plist_to_json_sorted).collect())
+        }
+        Value::Dictionary(dict) => {
+            // Use BTreeMap for sorted keys
+            let mut map = serde_json::Map::new();
+            let mut keys: Vec<&str> = dict.keys().map(|k| k.as_str()).collect();
+            keys.sort();
+            for k in keys {
+                if let Some(v) = dict.get(k) {
+                    map.insert(k.to_string(), plist_to_json_sorted(v));
+                }
+            }
+            serde_json::Value::Object(map)
+        }
+        Value::Uid(_) => serde_json::Value::Null,
+        _ => serde_json::Value::Null,
     }
 }
 
