@@ -8,5 +8,6 @@ rust_binary(
         "//crates/xcbuild-bom",
         "@crates//:anyhow",
         "@crates//:clap",
+        "@crates//:libc",
     ],
 )
