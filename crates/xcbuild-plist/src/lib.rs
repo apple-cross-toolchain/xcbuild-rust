@@ -30,6 +30,8 @@ pub enum PlistFormat {
     Ascii,
     Json,
     Raw,
+    Swift,
+    Objc,
 }
 
 impl PlistFormat {
@@ -40,6 +42,8 @@ impl PlistFormat {
             PlistFormat::Ascii => "openstep1",
             PlistFormat::Json => "json",
             PlistFormat::Raw => "raw",
+            PlistFormat::Swift => "swift",
+            PlistFormat::Objc => "objc",
         }
     }
 
@@ -50,6 +54,8 @@ impl PlistFormat {
             "openstep1" | "ascii1" => Some(PlistFormat::Ascii),
             "json" => Some(PlistFormat::Json),
             "raw" => Some(PlistFormat::Raw),
+            "swift" => Some(PlistFormat::Swift),
+            "objc" => Some(PlistFormat::Objc),
             _ => None,
         }
     }
@@ -70,13 +76,13 @@ pub enum ObjectType {
 
 impl ObjectType {
     pub fn parse(name: &str) -> Option<Self> {
-        match name {
+        match name.to_ascii_lowercase().as_str() {
             "string" => Some(ObjectType::String),
-            "dictionary" => Some(ObjectType::Dictionary),
+            "dictionary" | "dict" => Some(ObjectType::Dictionary),
             "array" => Some(ObjectType::Array),
-            "bool" => Some(ObjectType::Boolean),
-            "real" => Some(ObjectType::Real),
-            "integer" => Some(ObjectType::Integer),
+            "bool" | "boolean" => Some(ObjectType::Boolean),
+            "real" | "float" => Some(ObjectType::Real),
+            "integer" | "int" => Some(ObjectType::Integer),
             "date" => Some(ObjectType::Date),
             "data" => Some(ObjectType::Data),
             _ => None,
@@ -149,7 +155,7 @@ pub fn deserialize_with_format(data: &[u8], format: PlistFormat) -> Result<Value
             let json_value: serde_json::Value = serde_json::from_slice(data)?;
             Ok(json_to_plist(json_value))
         }
-        PlistFormat::Raw => Err(PlistError::UnknownFormat),
+        PlistFormat::Raw | PlistFormat::Swift | PlistFormat::Objc => Err(PlistError::UnknownFormat),
     }
 }
 
@@ -173,6 +179,8 @@ pub fn serialize(value: &Value, format: PlistFormat) -> Result<Vec<u8>, PlistErr
             Ok(buf)
         }
         PlistFormat::Raw => Ok(serialize_raw(value)),
+        PlistFormat::Swift => Ok(serialize_swift(value, true)),
+        PlistFormat::Objc => Ok(serialize_objc(value, true)),
     }
 }
 
@@ -223,6 +231,177 @@ fn serialize_raw(value: &Value) -> Vec<u8> {
     let mut bytes = s.into_bytes();
     bytes.push(b'\n');
     bytes
+}
+
+fn format_swift_literal(value: &Value, indent: usize, pretty: bool) -> String {
+    match value {
+        Value::Dictionary(dictionary) => {
+            if dictionary.is_empty() {
+                return "[:]".to_string();
+            }
+            let mut out = String::new();
+            out.push('[');
+            if pretty {
+                out.push('\n');
+            }
+            for (i, (key, val)) in dictionary.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                    if pretty {
+                        out.push('\n');
+                    }
+                }
+                if pretty {
+                    out.push_str(&" ".repeat(indent + 2));
+                }
+                out.push_str(&format!(
+                    "\"{}\": {}",
+                    key.replace('\\', "\\\\").replace('"', "\\\""),
+                    format_swift_literal(val, indent + 2, pretty)
+                ));
+            }
+            if pretty {
+                out.push('\n');
+                out.push_str(&" ".repeat(indent));
+            }
+            out.push(']');
+            out
+        }
+        Value::Array(array) => {
+            let mut out = String::new();
+            out.push('[');
+            if pretty && !array.is_empty() {
+                out.push('\n');
+            }
+            for (i, val) in array.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                    if pretty {
+                        out.push('\n');
+                    }
+                }
+                if pretty {
+                    out.push_str(&" ".repeat(indent + 2));
+                }
+                out.push_str(&format_swift_literal(val, indent + 2, pretty));
+            }
+            if pretty && !array.is_empty() {
+                out.push('\n');
+                out.push_str(&" ".repeat(indent));
+            }
+            out.push(']');
+            out
+        }
+        Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
+        Value::Integer(i) => {
+            if let Some(n) = i.as_signed() {
+                n.to_string()
+            } else if let Some(n) = i.as_unsigned() {
+                n.to_string()
+            } else {
+                "0".to_string()
+            }
+        }
+        Value::Real(f) => f.to_string(),
+        Value::Data(d) => format!("Data(base64Encoded: \"{}\")!", base64_encode(d)),
+        Value::Date(d) => format!("\"{}\"", d.to_xml_format()),
+        Value::Uid(u) => u.get().to_string(),
+        _ => "nil".to_string(),
+    }
+}
+
+fn format_objc_literal(value: &Value, indent: usize, pretty: bool) -> String {
+    match value {
+        Value::Dictionary(dictionary) => {
+            if dictionary.is_empty() {
+                return "@{}".to_string();
+            }
+            let mut out = String::new();
+            out.push_str("@{");
+            if pretty {
+                out.push('\n');
+            }
+            for (i, (key, val)) in dictionary.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                    if pretty {
+                        out.push('\n');
+                    }
+                }
+                if pretty {
+                    out.push_str(&" ".repeat(indent + 2));
+                }
+                out.push_str(&format!(
+                    "@\"{}\": {}",
+                    key.replace('\\', "\\\\").replace('"', "\\\""),
+                    format_objc_literal(val, indent + 2, pretty)
+                ));
+            }
+            if pretty {
+                out.push('\n');
+                out.push_str(&" ".repeat(indent));
+            }
+            out.push('}');
+            out
+        }
+        Value::Array(array) => {
+            let mut out = String::new();
+            out.push_str("@[");
+            if pretty && !array.is_empty() {
+                out.push('\n');
+            }
+            for (i, val) in array.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                    if pretty {
+                        out.push('\n');
+                    }
+                }
+                if pretty {
+                    out.push_str(&" ".repeat(indent + 2));
+                }
+                out.push_str(&format_objc_literal(val, indent + 2, pretty));
+            }
+            if pretty && !array.is_empty() {
+                out.push('\n');
+                out.push_str(&" ".repeat(indent));
+            }
+            out.push(']');
+            out
+        }
+        Value::String(s) => format!("@\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::Boolean(b) => if *b { "@YES" } else { "@NO" }.to_string(),
+        Value::Integer(i) => {
+            if let Some(n) = i.as_signed() {
+                format!("@({n})")
+            } else if let Some(n) = i.as_unsigned() {
+                format!("@({n})")
+            } else {
+                "@(0)".to_string()
+            }
+        }
+        Value::Real(f) => format!("@({f})"),
+        Value::Data(d) => format!(
+            "[NSData dataWithBase64EncodedString:@\"{}\" options:0]",
+            base64_encode(d)
+        ),
+        Value::Date(d) => format!("@\"{}\"", d.to_xml_format()),
+        Value::Uid(u) => format!("@({})", u.get()),
+        _ => "[NSNull null]".to_string(),
+    }
+}
+
+fn serialize_swift(value: &Value, pretty: bool) -> Vec<u8> {
+    let mut s = format_swift_literal(value, 0, pretty);
+    s.push('\n');
+    s.into_bytes()
+}
+
+fn serialize_objc(value: &Value, pretty: bool) -> Vec<u8> {
+    let mut s = format_objc_literal(value, 0, pretty);
+    s.push('\n');
+    s.into_bytes()
 }
 
 fn plist_to_json_sorted(value: &Value) -> serde_json::Value {
@@ -406,20 +585,70 @@ pub fn get_at_key_path_mut<'a>(value: &'a mut Value, keys: &[String]) -> Option<
     Some(current)
 }
 
+/// Parse a boolean string value. Case-insensitive, accepts YES/NO, true/false, 1/0.
+pub fn parse_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "yes" | "true" | "1" => Some(true),
+        "no" | "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Decode a base64-encoded string into bytes.
+pub fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    const DECODE: [u8; 256] = {
+        let mut table = [0xFFu8; 256];
+        let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut i = 0;
+        while i < 64 {
+            table[chars[i] as usize] = i as u8;
+            i += 1;
+        }
+        table
+    };
+
+    let input: Vec<u8> = input.bytes().filter(|&b| !b.is_ascii_whitespace()).collect();
+    let mut result = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+
+    for &byte in &input {
+        if byte == b'=' {
+            break;
+        }
+        let val = DECODE[byte as usize];
+        if val == 0xFF {
+            return Err(format!("invalid base64 character: {}", byte as char));
+        }
+        buf = (buf << 6) | val as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            result.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+
+    Ok(result)
+}
+
 /// Create a new plist Value from a type and string value.
 pub fn create_value(obj_type: ObjectType, value_str: &str) -> Option<Value> {
     match obj_type {
         ObjectType::String => Some(Value::String(value_str.to_string())),
         ObjectType::Dictionary => Some(Value::Dictionary(plist::Dictionary::new())),
         ObjectType::Array => Some(Value::Array(Vec::new())),
-        ObjectType::Boolean => {
-            let b = matches!(value_str, "true" | "YES" | "1");
-            Some(Value::Boolean(b))
-        }
+        ObjectType::Boolean => parse_bool(value_str).map(Value::Boolean),
         ObjectType::Real => value_str.parse::<f64>().ok().map(Value::Real),
         ObjectType::Integer => value_str.parse::<i64>().ok().map(|i| Value::Integer(i.into())),
-        ObjectType::Date => Some(Value::String(value_str.to_string())),
-        ObjectType::Data => Some(Value::Data(value_str.as_bytes().to_vec())),
+        ObjectType::Date => {
+            plist::Date::from_xml_format(value_str)
+                .ok()
+                .map(Value::Date)
+        }
+        ObjectType::Data => {
+            base64_decode(value_str).ok().map(Value::Data)
+        }
     }
 }
 
