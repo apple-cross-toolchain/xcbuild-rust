@@ -261,12 +261,10 @@ fn main() {
         } else if show_sdk_version {
             println!("{}", target.version.as_deref().unwrap_or(""));
         } else if show_sdk_build_version {
-            if let Some(product) = &target.product {
-                println!("{}", product.build_version.as_deref().unwrap_or(""));
-            } else {
-                eprintln!("error: sdk has no build version");
-                process::exit(1);
-            }
+            let build_version = target.product.as_ref()
+                .and_then(|p| p.build_version.as_deref())
+                .or(target.canonical_name.as_deref());
+            println!("{}", build_version.unwrap_or(""));
         } else if show_sdk_platform_path {
             println!("{}", platform.path);
         } else if show_sdk_platform_version {
@@ -309,8 +307,20 @@ fn main() {
         }
     }
 
+    // Check if tool is an absolute/relative path
+    let executable = if tool_name.contains('/') {
+        let path = std::path::PathBuf::from(&tool_name);
+        if path.is_file() {
+            Some(path)
+        } else {
+            None
+        }
+    } else {
+        find_executable(&tool_name, &exec_paths)
+    };
+
     // Find the tool
-    let executable = match find_executable(&tool_name, &exec_paths) {
+    let executable = match executable {
         Some(e) => e,
         None => {
             eprintln!("error: tool '{tool_name}' not found");
@@ -339,6 +349,14 @@ fn main() {
                 target.path,
                 executable.display()
             );
+        }
+    }
+
+    // Forward TOOLCHAINS to child process
+    if let Some(tc_input) = &toolchain_input_ref {
+        env::set_var("TOOLCHAINS", tc_input);
+        if log_mode {
+            println!("env TOOLCHAINS={} {}", tc_input, executable.display());
         }
     }
 
