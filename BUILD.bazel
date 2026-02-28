@@ -29,6 +29,7 @@ pkg_tar(
         "//tools/dump-xcspec:dump_xcspec",
         "//tools/dump-xcworkspace:dump_xcworkspace",
         "//tools/lsbom",
+        "//tools/mkbom",
         "//tools/plist-buddy:PlistBuddy",
         "//tools/plutil",
         "//tools/xcode-select",
