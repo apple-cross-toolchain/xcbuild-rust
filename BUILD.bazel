@@ -1,11 +1,11 @@
-load("@rules_pkg//:pkg.bzl", "pkg_tar")
+load("@tar.bzl", "tar")
 
 exports_files([
     "Cargo.toml",
     "Cargo.lock",
 ])
 
-pkg_tar(
+tar(
     name = "xcbuild",
     srcs = [
         "//tools/actool",
@@ -35,5 +35,6 @@ pkg_tar(
         "//tools/xcode-select",
         "//tools/xcrun",
     ],
-    extension = "tar.xz",
+    compress = "xz",
+    out = "xcbuild.tar.xz",
 )
