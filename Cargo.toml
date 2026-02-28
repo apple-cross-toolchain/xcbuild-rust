@@ -18,7 +18,7 @@ members = [
     "tools/xcrun",
     "tools/xcode-select",
     "tools/plutil",
-    "tools/plist-buddy",
+    "tools/PlistBuddy",
     "tools/lsbom",
     "tools/mkbom",
     "tools/actool",
@@ -41,6 +41,7 @@ members = [
     "tools/builtin-productPackagingUtility",
     "tools/builtin-validationUtility",
     "tools/builtin-embeddedBinaryValidationUtility",
+    "tools/sw_vers",
 ]
 
 [workspace.dependencies]
