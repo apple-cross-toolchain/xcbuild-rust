@@ -33,14 +33,14 @@ members = [
     "tools/dump-dependency",
     "tools/dependency-info-tool",
     "tools/builtin-copy",
-    "tools/builtin-copy-plist",
-    "tools/builtin-copy-strings",
-    "tools/builtin-copy-tiff",
-    "tools/builtin-info-plist-utility",
-    "tools/builtin-ls-register-url",
-    "tools/builtin-product-packaging-utility",
-    "tools/builtin-validation-utility",
-    "tools/builtin-embedded-binary-validation-utility",
+    "tools/builtin-copyPlist",
+    "tools/builtin-copyStrings",
+    "tools/builtin-copyTiff",
+    "tools/builtin-infoPlistUtility",
+    "tools/builtin-lsRegisterURL",
+    "tools/builtin-productPackagingUtility",
+    "tools/builtin-validationUtility",
+    "tools/builtin-embeddedBinaryValidationUtility",
 ]
 
 [workspace.dependencies]
