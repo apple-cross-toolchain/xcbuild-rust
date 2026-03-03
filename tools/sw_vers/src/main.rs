@@ -47,8 +47,33 @@ fn find_product() -> Result<Product> {
     bail!("unable to determine macOS version")
 }
 
+/// Convert single-dash long options (e.g. `-productName`) to double-dash
+/// so that clap can parse them. Real sw_vers accepts both forms.
+fn normalize_args() -> Vec<String> {
+    let known = [
+        "productName",
+        "ProductName",
+        "productVersion",
+        "ProductVersion",
+        "productVersionExtra",
+        "ProductVersionExtra",
+        "buildVersion",
+        "BuildVersion",
+    ];
+    std::env::args()
+        .map(|arg| {
+            if let Some(name) = arg.strip_prefix('-') {
+                if !name.starts_with('-') && known.contains(&name) {
+                    return format!("--{name}");
+                }
+            }
+            arg
+        })
+        .collect()
+}
+
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalize_args());
     let product = find_product()?;
 
     if cli.product_name {
