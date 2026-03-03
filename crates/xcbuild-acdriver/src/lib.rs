@@ -564,11 +564,6 @@ fn run_compile(opts: &Options, compile_path: &str, result: &mut ActoolResult) {
             }
         };
 
-        result.notices.push(Message {
-            description: format!("compiling asset catalog '{input}'"),
-            failure_reason: None,
-        });
-
         // Collect image references from the catalog
         collect_asset_files(&asset, input, &mut all_images);
     }
